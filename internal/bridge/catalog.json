@@ -2409,5 +2409,125 @@
       "testing",
       "qa"
     ]
+  },
+  {
+    "id": "code-reviewer",
+    "name": "Code Reviewer",
+    "description": "Reviews GitHub pull requests for correctness, style, and bugs. Project-agnostic with template variables.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/code-reviewer.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/code-reviewer.md",
+    "tags": [
+      "github",
+      "code-review",
+      "starter"
+    ]
+  },
+  {
+    "id": "code-reviewer-gitlab",
+    "name": "Code Reviewer (GitLab)",
+    "description": "Reviews GitLab merge requests for correctness, style, and bugs. Project-agnostic with template variables.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/code-reviewer-gitlab.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/code-reviewer.md",
+    "tags": [
+      "gitlab",
+      "code-review",
+      "starter"
+    ]
+  },
+  {
+    "id": "test-runner",
+    "name": "Test Runner",
+    "description": "Auto-detects project type and runs tests. Supports dev containers and multiple languages/frameworks.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/test-runner.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/test-runner.md",
+    "tags": [
+      "github",
+      "testing",
+      "starter"
+    ]
+  },
+  {
+    "id": "test-runner-gitlab",
+    "name": "Test Runner (GitLab)",
+    "description": "Auto-detects project type and runs tests. Supports dev containers and multiple languages/frameworks.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/test-runner-gitlab.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/test-runner.md",
+    "tags": [
+      "gitlab",
+      "testing",
+      "starter"
+    ]
+  },
+  {
+    "id": "doc-updater",
+    "name": "Documentation Updater",
+    "description": "Updates project documentation when code changes affect user-facing APIs or behavior.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/doc-updater.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/doc-updater.md",
+    "tags": [
+      "github",
+      "documentation",
+      "starter"
+    ]
+  },
+  {
+    "id": "doc-updater-gitlab",
+    "name": "Documentation Updater (GitLab)",
+    "description": "Updates project documentation when code changes affect user-facing APIs or behavior.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/doc-updater-gitlab.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/doc-updater.md",
+    "tags": [
+      "gitlab",
+      "documentation",
+      "starter"
+    ]
+  },
+  {
+    "id": "backlog-triage",
+    "name": "Backlog Triage",
+    "description": "Checks new issues for duplicates and suggests appropriate labels. Project-agnostic triage automation.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/backlog-triage.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/backlog-triage.md",
+    "tags": [
+      "github",
+      "triage",
+      "starter"
+    ]
+  },
+  {
+    "id": "backlog-triage-gitlab",
+    "name": "Backlog Triage (GitLab)",
+    "description": "Checks new issues for duplicates and suggests appropriate labels. Project-agnostic triage automation.",
+    "category": "starter-kits",
+    "source_type": "starter-agents",
+    "source_url": "https://github.com/alcove-ai/alcove-starter-agents",
+    "source_path": ".alcove/agents/backlog-triage-gitlab.yml",
+    "docs_url": "https://github.com/alcove-ai/alcove-starter-agents/blob/main/docs/backlog-triage.md",
+    "tags": [
+      "gitlab",
+      "triage",
+      "starter"
+    ]
   }
 ]

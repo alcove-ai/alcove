@@ -1,0 +1,54 @@
+name: PR Review Pipeline
+description: |
+  Automated code review workflow for GitHub pull requests.
+  Runs code reviewer agent and posts review comments.
+
+trigger:
+  github:
+    events: [pull_request]
+    actions: [opened, synchronize]
+    delivery_mode: polling
+
+workflow:
+  - id: code-review
+    type: agent
+    agent: alcove-starter-agents/code-reviewer
+    inputs:
+      pr_number: "{{trigger.pr_number}}"
+      repo: "{{trigger.repo}}"
+      repo_url: "{{trigger.repo_url}}"
+    outputs: [approved, comments]
+    output_contract:
+      required: [approved, comments]
+      allowed_values:
+        approved: ["true", "false"]
+
+  - id: run-tests
+    type: agent
+    agent: alcove-starter-agents/test-runner
+    depends: "code-review.Succeeded"
+    inputs:
+      repo: "{{trigger.repo}}"
+      repo_url: "{{trigger.repo_url}}"
+      pr_number: "{{trigger.pr_number}}"
+    outputs: [passed, summary]
+    output_contract:
+      required: [passed, summary]
+      allowed_values:
+        passed: ["true", "false"]
+
+  - id: comment-summary
+    type: bridge
+    action: create-comment
+    depends: "run-tests.Completed"
+    inputs:
+      repo: "{{trigger.repo}}"
+      pr: "{{trigger.pr_number}}"
+      body: |
+        ## Automated Review Summary
+
+        **Code Review**: {{steps.code-review.outputs.approved == "true" && "✅ Approved" || "❌ Changes Requested"}}
+        {{steps.code-review.outputs.comments}}
+
+        **Tests**: {{steps.run-tests.outputs.passed == "true" && "✅ Passed" || "❌ Failed"}}
+        {{steps.run-tests.outputs.summary}}

@@ -155,6 +155,63 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/sessions
 make down
 ```
 
+## Starter Agents
+
+New to Alcove? Get started quickly with our curated collection of starter agents that work with any repository.
+
+### Add the Starter Repository
+
+1. **In the dashboard**: Go to Settings → Skill Repositories
+2. **Add repository**: `https://github.com/alcove-ai/alcove-starter-agents`
+3. **Sync**: Click "Sync Now" to import agents and workflows
+
+### Available Starter Agents
+
+| Agent | Purpose | Platforms |
+|-------|---------|-----------|
+| **Code Reviewer** | Reviews PRs/MRs for bugs, style, and correctness | GitHub, GitLab |
+| **Test Runner** | Auto-detects and runs project test suites | GitHub, GitLab |
+| **Documentation Updater** | Updates docs when code changes affect APIs | GitHub, GitLab |
+| **Backlog Triage** | Detects duplicate issues, suggests labels | GitHub, GitLab |
+
+### Enable Agents from the Catalog
+
+1. **Go to Catalog** → **Starter Kits** in the dashboard
+2. **Toggle on** the agents you want to use
+3. **Choose the right platform**: Select GitHub or GitLab variants as appropriate
+
+### Use in Workflows
+
+Reference starter agents in your workflow definitions:
+
+```yaml
+# Example: Automated PR review
+name: Code Review Pipeline
+trigger:
+  github:
+    events: [pull_request]
+    actions: [opened, synchronize]
+
+workflow:
+  - id: review
+    type: agent
+    agent: alcove-starter-agents/code-reviewer
+    inputs:
+      pr_number: "{{trigger.pr_number}}"
+      repo: "{{trigger.repo}}"
+      repo_url: "{{trigger.repo_url}}"
+```
+
+### Customization
+
+The starter agents are project-agnostic and work with any repository using template variables. To customize them for your specific needs:
+
+1. **Fork** the [alcove-starter-agents](https://github.com/alcove-ai/alcove-starter-agents) repository
+2. **Modify** agent prompts for your project conventions
+3. **Update** your skill repository URL to point to your fork
+
+See the [customization guide](https://github.com/alcove-ai/alcove-starter-agents/blob/main/CUSTOMIZATION.md) for detailed examples.
+
 ## Connecting to an Existing Instance
 
 If you received a remote Alcove URL and need to connect your CLI, follow this

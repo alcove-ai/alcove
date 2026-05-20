@@ -1,0 +1,54 @@
+name: MR Review Pipeline (GitLab)
+description: |
+  Automated code review workflow for GitLab merge requests.
+  Runs code reviewer agent and posts review comments.
+
+trigger:
+  gitlab:
+    events: [merge_request]
+    actions: [open, update]
+    delivery_mode: polling
+
+workflow:
+  - id: code-review
+    type: agent
+    agent: alcove-starter-agents/code-reviewer-gitlab
+    inputs:
+      mr_iid: "{{trigger.mr_iid}}"
+      gitlab_project: "{{trigger.gitlab_project}}"
+      project_url: "{{trigger.project_url}}"
+    outputs: [approved, comments]
+    output_contract:
+      required: [approved, comments]
+      allowed_values:
+        approved: ["true", "false"]
+
+  - id: run-tests
+    type: agent
+    agent: alcove-starter-agents/test-runner-gitlab
+    depends: "code-review.Succeeded"
+    inputs:
+      gitlab_project: "{{trigger.gitlab_project}}"
+      project_url: "{{trigger.project_url}}"
+      mr_iid: "{{trigger.mr_iid}}"
+    outputs: [passed, summary]
+    output_contract:
+      required: [passed, summary]
+      allowed_values:
+        passed: ["true", "false"]
+
+  - id: comment-summary
+    type: bridge
+    action: create-comment
+    depends: "run-tests.Completed"
+    inputs:
+      project: "{{trigger.gitlab_project}}"
+      mr: "{{trigger.mr_iid}}"
+      body: |
+        ## Automated Review Summary
+
+        **Code Review**: {{steps.code-review.outputs.approved == "true" && "✅ Approved" || "❌ Changes Requested"}}
+        {{steps.code-review.outputs.comments}}
+
+        **Tests**: {{steps.run-tests.outputs.passed == "true" && "✅ Passed" || "❌ Failed"}}
+        {{steps.run-tests.outputs.summary}}

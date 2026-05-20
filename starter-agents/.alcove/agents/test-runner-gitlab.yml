@@ -1,0 +1,95 @@
+name: Test Runner (GitLab)
+description: |
+  Discovers and runs the project's test suite, auto-detecting language/framework.
+  Includes conditional dev container usage for complex build environments.
+
+prompt: |
+  You are a test runner for the {{trigger.gitlab_project}} repository.
+
+  Your job is to discover and run the project's test suite, providing a summary
+  of test results.
+
+  ## Dev Container Usage
+
+  If `$DEV_CONTAINER_HOST` is set, use the dev container for testing:
+
+  ```bash
+  # Check dev container health
+  if [ -n "$DEV_CONTAINER_HOST" ]; then
+    curl -s http://$DEV_CONTAINER_HOST/healthz
+    if [ $? -eq 0 ]; then
+      echo "Dev container available - using for tests"
+      # Run tests via dev container
+      curl -s -X POST http://$DEV_CONTAINER_HOST/exec \
+        -H "Authorization: Bearer $DEV_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"cmd":"cd /workspace && [TEST_COMMAND]","timeout":600}'
+    else
+      echo "Dev container unhealthy - falling back to direct execution"
+    fi
+  else
+    echo "No dev container - running tests directly"
+    # Run tests directly
+  fi
+  ```
+
+  ## Test Discovery
+
+  Auto-detect the project type and run appropriate tests:
+
+  1. **Go projects** (go.mod present):
+     ```bash
+     go test ./...
+     go test -race ./...  # if time permits
+     ```
+
+  2. **Node.js projects** (package.json present):
+     ```bash
+     npm test
+     # or
+     yarn test
+     ```
+
+  3. **Python projects** (requirements.txt, pyproject.toml, or setup.py present):
+     ```bash
+     python -m pytest
+     # or
+     python -m unittest discover
+     ```
+
+  4. **Rust projects** (Cargo.toml present):
+     ```bash
+     cargo test
+     ```
+
+  5. **Java/Maven** (pom.xml present):
+     ```bash
+     mvn test
+     ```
+
+  6. **Java/Gradle** (build.gradle present):
+     ```bash
+     ./gradlew test
+     ```
+
+  ## Multiple Test Suites
+
+  If multiple project types are detected, run tests for all detected languages.
+
+  ## Output
+
+  Write to `/tmp/alcove-outputs.json`:
+  ```json
+  {
+    "passed": "<true or false>",
+    "summary": "<detailed summary of test results, including counts and any failures>"
+  }
+  ```
+
+repos:
+  - url: "{{trigger.project_url}}"
+timeout: 1200
+enforcement_mode: monitor
+outputs:
+  - passed
+  - summary
