@@ -1,0 +1,79 @@
+name: Validate YAML
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint YAML files
+        run: yamllint .
+
+      - name: Validate agent definitions
+        run: |
+          echo "Validating agent definitions..."
+          for agent in .alcove/agents/*.yml; do
+            echo "Checking $agent"
+
+            # Check required fields exist
+            if ! grep -q "^name:" "$agent"; then
+              echo "ERROR: Missing 'name' field in $agent"
+              exit 1
+            fi
+
+            if ! grep -q "^prompt:" "$agent"; then
+              echo "ERROR: Missing 'prompt' field in $agent"
+              exit 1
+            fi
+
+            if ! grep -q "^timeout:" "$agent"; then
+              echo "ERROR: Missing 'timeout' field in $agent"
+              exit 1
+            fi
+
+            if ! grep -q "^outputs:" "$agent"; then
+              echo "ERROR: Missing 'outputs' field in $agent"
+              exit 1
+            fi
+
+            echo "✓ $agent is valid"
+          done
+
+      - name: Validate workflow definitions
+        run: |
+          echo "Validating workflow definitions..."
+          for workflow in .alcove/workflows/*.yml; do
+            echo "Checking $workflow"
+
+            # Check required fields exist
+            if ! grep -q "^name:" "$workflow"; then
+              echo "ERROR: Missing 'name' field in $workflow"
+              exit 1
+            fi
+
+            if ! grep -q "^trigger:" "$workflow"; then
+              echo "ERROR: Missing 'trigger' field in $workflow"
+              exit 1
+            fi
+
+            if ! grep -q "^workflow:" "$workflow"; then
+              echo "ERROR: Missing 'workflow' field in $workflow"
+              exit 1
+            fi
+
+            echo "✓ $workflow is valid"
+          done

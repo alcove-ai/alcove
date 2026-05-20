@@ -1,0 +1,22 @@
+name: GitLab Issue Triage Pipeline
+description: |
+  Automated issue triage workflow for GitLab issues.
+  Checks for duplicates and suggests appropriate labels.
+
+trigger:
+  gitlab:
+    events: [issue]
+    actions: [open]
+    delivery_mode: polling
+
+workflow:
+  - id: triage-issue
+    type: agent
+    agent: alcove-starter-agents/backlog-triage-gitlab
+    inputs:
+      issue_iid: "{{trigger.issue_iid}}"
+      issue_title: "{{trigger.issue_title}}"
+      issue_description: "{{trigger.issue_description}}"
+      gitlab_project: "{{trigger.gitlab_project}}"
+      project_url: "{{trigger.project_url}}"
+    outputs: [duplicate_of, suggested_labels]

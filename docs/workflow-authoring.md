@@ -76,6 +76,143 @@ workflow to fail silently at runtime.
 | Agent slug exists but is disabled | Sync warning |
 | Agent slug not found in any source | Sync error |
 
+## Using Starter Agents
+
+Alcove provides a curated collection of [starter agents](https://github.com/alcove-ai/alcove-starter-agents) that work with any repository out of the box. These agents are project-agnostic and use template variables to adapt to different projects.
+
+### Adding Starter Agents
+
+1. **Add the skill repository** in your dashboard: Settings → Skill Repositories → Add `https://github.com/alcove-ai/alcove-starter-agents`
+2. **Enable agents** from the catalog: Catalog → Starter Kits → Toggle on the agents you need
+3. **Choose the right platform**: Select GitHub or GitLab variants based on your SCM
+
+### Available Starter Agents
+
+| Agent ID | Purpose | Platforms | Required Scopes |
+|----------|---------|-----------|-----------------|
+| `alcove-starter-agents/code-reviewer` | Reviews PRs for correctness, style, bugs | GitHub | `github:read`, `github:review` |
+| `alcove-starter-agents/code-reviewer-gitlab` | Reviews MRs for correctness, style, bugs | GitLab | `gitlab:read`, `gitlab:review` |
+| `alcove-starter-agents/test-runner` | Auto-detects and runs test suites | GitHub | `github:read` |
+| `alcove-starter-agents/test-runner-gitlab` | Auto-detects and runs test suites | GitLab | `gitlab:read` |
+| `alcove-starter-agents/doc-updater` | Updates docs when APIs change | GitHub | `github:read`, `github:write` |
+| `alcove-starter-agents/doc-updater-gitlab` | Updates docs when APIs change | GitLab | `gitlab:read`, `gitlab:write` |
+| `alcove-starter-agents/backlog-triage` | Detects duplicates, suggests labels | GitHub | `github:read` |
+| `alcove-starter-agents/backlog-triage-gitlab` | Detects duplicates, suggests labels | GitLab | `gitlab:read` |
+
+### Example: PR Review Pipeline
+
+```yaml
+name: Automated PR Review
+trigger:
+  github:
+    events: [pull_request]
+    actions: [opened, synchronize]
+
+workflow:
+  - id: code-review
+    type: agent
+    agent: alcove-starter-agents/code-reviewer
+    inputs:
+      pr_number: "{{trigger.pr_number}}"
+      repo: "{{trigger.repo}}"
+      repo_url: "{{trigger.repo_url}}"
+    outputs: [approved, comments]
+    output_contract:
+      required: [approved, comments]
+      allowed_values:
+        approved: ["true", "false"]
+      routing_field: approved
+      success_value: "true"
+
+  - id: run-tests
+    type: agent
+    agent: alcove-starter-agents/test-runner
+    depends: "code-review.Succeeded"
+    inputs:
+      repo: "{{trigger.repo}}"
+      repo_url: "{{trigger.repo_url}}"
+      pr_number: "{{trigger.pr_number}}"
+    outputs: [passed, summary]
+
+  - id: comment-summary
+    type: bridge
+    action: create-comment
+    depends: "run-tests.Completed"
+    inputs:
+      repo: "{{trigger.repo}}"
+      pr: "{{trigger.pr_number}}"
+      body: |
+        ## Automated Review Summary
+
+        **Code Review**: {{steps.code-review.outputs.approved == "true" && "✅ Approved" || "❌ Changes Requested"}}
+        {{steps.code-review.outputs.comments}}
+
+        **Tests**: {{steps.run-tests.outputs.passed == "true" && "✅ Passed" || "❌ Failed"}}
+        {{steps.run-tests.outputs.summary}}
+```
+
+### Example: Issue Triage
+
+```yaml
+name: Issue Triage
+trigger:
+  github:
+    events: [issues]
+    actions: [opened]
+
+workflow:
+  - id: triage
+    type: agent
+    agent: alcove-starter-agents/backlog-triage
+    inputs:
+      issue_number: "{{trigger.issue_number}}"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      repo: "{{trigger.repo}}"
+      repo_url: "{{trigger.repo_url}}"
+    outputs: [duplicate_of, suggested_labels]
+```
+
+### Template Variables for SCM Platforms
+
+Starter agents use different template variables depending on the SCM platform:
+
+| Variable | GitHub | GitLab |
+|----------|---------|--------|
+| **Repository** | `{{trigger.repo}}` | `{{trigger.gitlab_project}}` |
+| **Repository URL** | `{{trigger.repo_url}}` | `{{trigger.project_url}}` |
+| **PR/MR ID** | `{{trigger.pr_number}}` | `{{trigger.mr_iid}}` |
+| **Issue ID** | `{{trigger.issue_number}}` | `{{trigger.issue_iid}}` |
+| **Issue Content** | `{{trigger.issue_body}}` | `{{trigger.issue_description}}` |
+
+### Customizing Starter Agents
+
+The starter agents are designed to be forked and customized for your specific needs:
+
+1. **Fork** the [alcove-starter-agents](https://github.com/alcove-ai/alcove-starter-agents) repository
+2. **Modify** agent prompts to include your project-specific conventions
+3. **Add** custom validation rules, security checks, or integration logic
+4. **Update** your skill repository to point to your fork
+
+Example customization for security-focused code review:
+```yaml
+name: Security Code Reviewer
+# Based on: alcove-starter-agents/code-reviewer.yml
+prompt: |
+  You are a security-focused code reviewer for {{trigger.repo}}.
+  
+  # Add project-specific security rules here
+  ## Security Checklist
+  - Check for SQL injection vulnerabilities
+  - Verify input validation and sanitization
+  - Look for hardcoded secrets or credentials
+  - Review authentication and authorization logic
+  
+  # Rest of the standard code review prompt...
+```
+
+See the [customization guide](https://github.com/alcove-ai/alcove-starter-agents/blob/main/CUSTOMIZATION.md) for detailed examples.
+
 ## Bridge Actions Reference
 
 ### create-pr
