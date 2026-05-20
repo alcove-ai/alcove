@@ -131,6 +131,92 @@ make k3s-status               # Show pods, port-forwards, and jobs
 - **Triple Team mode** — `triple_team: true` on agent definitions (or `--triple-team` CLI flag) prepends a prompt engineering wrapper that instructs Claude Code to use three phases of parallel sub-agents: Workers (3 diverse specialists), Evaluators (3 independent reviewers), and Integrators (3 synthesis agents); the wrapper text appears literally in the session prompt; defined in `internal/bridge/triple_team.go`
 - **k3s for local Kubernetes testing** — `make k3s-setup` installs k3s with `--disable=traefik --disable=servicelb --bind-address=127.0.0.1`; `make k3s-up` builds images, imports them via `podman save | sudo k3s ctr images import`, deploys PostgreSQL+NATS as Deployments with PVC, creates a headless `alcove-bridge` Service with manual Endpoints pointing to the host IP; Bridge runs on the host with `RUNTIME=kubernetes` connecting via `~/.kube/k3s-config`; Skiff/Gate pods reach Bridge via the `alcove-bridge` k8s Service; port-forwards expose PostgreSQL (5432) and NATS (4222) to localhost; requires `sudo` for k3s install and image import; `make k3s-down` deletes the namespace but keeps k3s installed; see architecture decision #23 in `docs/design/architecture-decisions.md`
 
+## Alcove CLI — Monitoring the SDLC on Staging
+
+Alcove's development SDLC runs on the HCMAI staging server. Use the `alcove` CLI to monitor sessions, workflows, and pipeline progress.
+
+### CLI Setup
+
+```bash
+alcove login --server https://alcove-bridge-pulp-stage.apps.rosa.hcmais01ue1.s9m2.p3.openshiftapps.com --username <user>
+alcove version                       # verify client/server versions match
+alcove teams list                    # list available teams
+```
+
+**Important:** All commands below require `--team "Alcove Development"` to target the right team. The SDLC pipelines, agents, and workflows all belong to the Alcove Development team.
+
+### Monitoring Sessions
+
+```bash
+alcove list --team "Alcove Development"                    # all sessions
+alcove list --team "Alcove Development" --status running    # only running sessions
+alcove list --team "Alcove Development" --since 24h        # last 24 hours
+alcove status <session-id> --team "Alcove Development"     # detailed session info
+alcove logs <session-id> --team "Alcove Development"       # view session transcript
+alcove logs <session-id> --proxy --team "Alcove Development"  # view Gate proxy log
+alcove cancel <session-id> --team "Alcove Development"     # cancel a running session
+```
+
+### Monitoring Workflows
+
+```bash
+alcove workflows list --team "Alcove Development"                  # list workflow definitions
+alcove workflows runs --team "Alcove Development"                  # list workflow runs (pipeline executions)
+alcove workflows runs --team "Alcove Development" --status running  # only active runs
+alcove workflows run <workflow-id> --team "Alcove Development"     # manually trigger a workflow
+alcove workflows cancel <run-id> --team "Alcove Development"       # cancel a running workflow
+```
+
+### Other Commands
+
+```bash
+alcove agents list --team "Alcove Development"        # synced agent definitions
+alcove agents repos --team "Alcove Development"       # connected agent repos
+alcove credentials list --team "Alcove Development"   # team credentials
+```
+
+## SDLC Pipelines and Label Behaviors
+
+Alcove runs 6 automated pipelines defined in `.alcove/workflows/`. They are triggered by GitHub issue labels (via polling every 2 minutes) or by schedule.
+
+### Label Reference
+
+| Label | Trigger | Pipeline | What Happens |
+|-------|---------|----------|--------------|
+| `ready-for-dev` | GitHub issue labeled | **Full SDLC Pipeline** | Bot claims the issue (assigns `alcove-bot`, removes label), implements the change, creates PR, waits for CI, runs code + security review, rebases, merges. Full autonomous development cycle. |
+| `ready-for-dev` | GitLab issue labeled | **GitLab SDLC Pipeline** | Same as above but using GitLab MRs, pipelines, and issue management. |
+| `ready-for-dev` | JIRA issue labeled | **JIRA SDLC Pipeline** | Same as above but triggered from JIRA, code goes to GitHub, closes JIRA issue and posts comment when done. |
+| `needs-planning` | GitHub issue labeled | **Milestone Planner** | Runs a 7-perspective planning committee (architect, security, devops, QA, UX, tech writer, performance). Produces an implementation plan in the issue body. Responds to follow-up comments on the issue. |
+| `immediate-release` | GitHub issue labeled | **Release Pipeline** | Generates changelog, creates PR, waits for CI, merges, tags release, waits for container image build, deploys to staging via app-interface MR. |
+| *(new issue opened)* | GitHub issue opened | **Backlog Triage** | Checks the new issue against all open issues for duplicates. If found, adds `possible-duplicate` label and comments. |
+
+### SDLC Pipeline Steps (all three platforms share this structure)
+
+```
+1. claim-issue      → assign bot, remove trigger label (bridge action)
+2. implement        → Autonomous Developer agent writes code, validates locally (go build/vet/test)
+3. create-pr        → create PR or MR (bridge action, auto-detects platform)
+4. await-ci         → poll for CI to pass (auto-recovers if checks don't appear)
+5. ci-fix           → if CI fails, agent fixes and pushes (up to 3 iterations)
+6. code-review      → PR Reviewer agent posts review (parallel with security-review)
+7. security-review  → Security Reviewer agent reviews for vulnerabilities
+8. revision         → if either review rejects, agent addresses feedback (up to 3 iterations)
+9. rebase           → merge latest main into PR branch before merging
+10. conflict-resolve → if rebase has conflicts, agent resolves them (up to 2 iterations)
+11. merge           → merge the PR (serialized with advisory lock)
+```
+
+The JIRA pipeline adds two steps after merge: `close-jira` (transition to "Done") and `comment-jira` (post PR link).
+
+### Reliability Features
+
+- **Pre-push validation**: agents must pass `go build`, `go vet`, and `go test` in the dev container before pushing
+- **CI-fix loop**: if CI fails, the pipeline re-dispatches the agent with failure logs (up to 3 iterations)
+- **Await-CI recovery**: if GitHub doesn't create check suites within 60s, Bridge pushes an empty commit; at 120s, closes and reopens the PR
+- **Rebase before merge**: updates the PR branch to latest main, preventing merge conflicts
+- **Merge serialization**: PostgreSQL advisory lock prevents concurrent merge races
+- **Output contracts**: review steps define required outputs (`approved`, `comments`) with allowed values; invalid outputs trigger retry
+
 ## Dev Container Limitations
 
 The dev container provides PostgreSQL, NATS, and Go for running tests.
