@@ -38,6 +38,9 @@ alcove.conf
 .opencode/node_modules/
 .opencode/package-lock.json
 .opencode/role.md
+.opencode/data.db
+.opencode/data.db-wal
+.opencode/data.db-shm
 !.env.example
 
 # OS
