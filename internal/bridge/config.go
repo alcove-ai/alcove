@@ -45,6 +45,10 @@ type Config struct {
 	// RHIdentityAdmins is a list of email addresses to bootstrap as admins
 	// when using the rh-identity auth backend.
 	RHIdentityAdmins []string
+
+	// OpenShiftOAuthAdmins is a list of usernames to bootstrap as admins
+	// when using the openshift-oauth auth backend.
+	OpenShiftOAuthAdmins []string
 }
 
 // SystemLLMConfig holds configuration for the Bridge system LLM.
@@ -154,6 +158,11 @@ For Kubernetes:
 		cfg.RHIdentityAdmins = splitAndTrim(v)
 	}
 
+	// OpenShift OAuth admin bootstrap from environment (comma-separated usernames).
+	if v := os.Getenv("OPENSHIFT_OAUTH_ADMINS"); v != "" {
+		cfg.OpenShiftOAuthAdmins = splitAndTrim(v)
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -202,7 +211,8 @@ type configFile struct {
 	AuthBackend           string   `yaml:"auth_backend"`
 	Port                  string   `yaml:"port"`
 	Runtime               string   `yaml:"runtime"`
-	RHIdentityAdmins      []string         `yaml:"rh_identity_admins"`
+	RHIdentityAdmins      []string `yaml:"rh_identity_admins"`
+	OpenShiftOAuthAdmins  []string `yaml:"openshift_oauth_admins"`
 	SystemLLM             *SystemLLMConfig `yaml:"system_llm"`
 }
 
@@ -239,6 +249,9 @@ func (c *Config) parseConfigFile(path string) error {
 	if len(cf.RHIdentityAdmins) > 0 {
 		c.RHIdentityAdmins = cf.RHIdentityAdmins
 	}
+	if len(cf.OpenShiftOAuthAdmins) > 0 {
+		c.OpenShiftOAuthAdmins = cf.OpenShiftOAuthAdmins
+	}
 	if cf.SystemLLM != nil {
 		c.SystemLLM = *cf.SystemLLM
 	}
@@ -249,8 +262,8 @@ func (c *Config) validate() error {
 	if c.RuntimeType != "podman" && c.RuntimeType != "kubernetes" {
 		return fmt.Errorf("invalid runtime %q: must be \"podman\" or \"kubernetes\"", c.RuntimeType)
 	}
-	if c.AuthBackend != "memory" && c.AuthBackend != "postgres" && c.AuthBackend != "rh-identity" {
-		return fmt.Errorf("invalid AUTH_BACKEND %q: must be \"memory\", \"postgres\", or \"rh-identity\"", c.AuthBackend)
+	if c.AuthBackend != "memory" && c.AuthBackend != "postgres" && c.AuthBackend != "rh-identity" && c.AuthBackend != "openshift-oauth" {
+		return fmt.Errorf("invalid AUTH_BACKEND %q: must be \"memory\", \"postgres\", \"rh-identity\", or \"openshift-oauth\"", c.AuthBackend)
 	}
 	return nil
 }

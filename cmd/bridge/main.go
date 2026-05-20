@@ -157,6 +157,17 @@ func main() {
 			mgr = m
 		}
 		log.Printf("auth backend: rh-identity (trusted header)")
+
+	case "openshift-oauth":
+		oauthStore := auth.NewOpenShiftOAuthStore(dbpool)
+		if err := oauthStore.BootstrapAdmins(context.Background(), cfg.OpenShiftOAuthAdmins); err != nil {
+			log.Fatalf("bootstrapping openshift-oauth admins: %v", err)
+		}
+		store = oauthStore
+		if m, ok := store.(auth.UserManager); ok {
+			mgr = m
+		}
+		log.Printf("auth backend: openshift-oauth (trusted headers from OAuth Proxy)")
 	}
 
 	// Create credential store and migrate env-based credentials.

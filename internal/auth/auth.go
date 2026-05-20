@@ -152,9 +152,13 @@ func LoginHandler(store Authenticator, mgr UserManager) http.HandlerFunc {
 			return
 		}
 
-		// Login is not supported with the rh-identity backend.
+		// Login is not supported with the rh-identity or openshift-oauth backends.
 		if _, ok := store.(*RHIdentityStore); ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "login not supported with rh-identity backend"})
+			return
+		}
+		if _, ok := store.(*OpenShiftOAuthStore); ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "login not supported with openshift-oauth backend"})
 			return
 		}
 
@@ -253,7 +257,66 @@ func AuthMiddleware(store Authenticator, mgr UserManager, db ...*pgxpool.Pool) f
 				return
 			}
 
-			// RH Identity mode: trust the X-RH-Identity header from Turnpike.
+			// OpenShift OAuth mode: trust the X-Forwarded-User and X-Forwarded-Email headers from OAuth Proxy.
+		if oauthStore, ok := store.(*OpenShiftOAuthStore); ok {
+			forwardedUser := r.Header.Get("X-Forwarded-User")
+			forwardedEmail := r.Header.Get("X-Forwarded-Email")
+
+			if forwardedUser == "" {
+				// For /api/v1/auth/me without a header, set error context
+				// so the frontend can detect and handle the auth error properly.
+				if path == "/api/v1/auth/me" {
+					log.Printf("auth: /api/v1/auth/me without X-Forwarded-User — setting error context")
+					r.Header.Set("X-Alcove-Auth-Error", "missing X-Forwarded-User header")
+					r.Header.Set("X-Alcove-Auth-Error-Message", "Authentication failed: no user header received. Ensure you are accessing Alcove through the OAuth Proxy.")
+					next.ServeHTTP(w, r)
+					return
+				}
+				log.Printf("auth: rejected %s %s — missing X-Forwarded-User header", r.Method, path)
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing X-Forwarded-User header"})
+				return
+			}
+
+			log.Printf("auth: openshift-oauth headers present for %s %s user=%s", r.Method, path, forwardedUser)
+			username, err := oauthStore.UpsertUser(r.Context(), forwardedUser, forwardedEmail)
+			if err != nil {
+				// For /api/v1/auth/me with provisioning failure, set error context
+				if path == "/api/v1/auth/me" {
+					log.Printf("auth: /api/v1/auth/me user provisioning failed — setting error context: %v", err)
+					r.Header.Set("X-Alcove-Auth-Error", "user provisioning failed")
+					r.Header.Set("X-Alcove-Auth-Error-Message", "Authentication failed: unable to provision user account. Contact your administrator.")
+					next.ServeHTTP(w, r)
+					return
+				}
+				log.Printf("auth: user provisioning failed for %s %s: %v", r.Method, path, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "user provisioning failed"})
+				return
+			}
+			log.Printf("auth: openshift-oauth authenticated user=%s for %s %s", username, r.Method, path)
+
+			r.Header.Set("X-Alcove-User", username)
+			if mgr != nil {
+				if admin, err := mgr.IsAdmin(r.Context(), username); err == nil && admin {
+					r.Header.Set("X-Alcove-Admin", "true")
+				}
+			}
+			// Resolve team ID.
+			isAdmin := r.Header.Get("X-Alcove-Admin") == "true"
+			teamHeader := r.Header.Get("X-Alcove-Team")
+			teamID, err := resolveTeamID(r.Context(), dbPool, username, teamHeader, isAdmin)
+			if err != nil {
+				log.Printf("auth: team resolution failed for user=%s team=%s: %v (falling back to personal team)", username, teamHeader, err)
+				// Fall back to personal team.
+				teamID, _ = resolveTeamID(r.Context(), dbPool, username, "", isAdmin)
+			}
+			if teamID != "" {
+				r.Header.Set("X-Alcove-Team-ID", teamID)
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// RH Identity mode: trust the X-RH-Identity header from Turnpike.
 			if rhStore, ok := store.(*RHIdentityStore); ok {
 				headerVal := r.Header.Get("X-RH-Identity")
 				if headerVal == "" {

@@ -19,7 +19,7 @@
     async function api(method, path, body) {
         const token = localStorage.getItem('alcove_token');
         const headers = { 'Content-Type': 'application/json' };
-        if (token && !rhIdentityMode) {
+        if (token && !rhIdentityMode && !openshiftOAuthMode) {
             headers['Authorization'] = 'Bearer ' + token;
         }
         // Include active team header on all requests
@@ -30,17 +30,19 @@
         if (body) opts.body = JSON.stringify(body);
         const resp = await fetch(basePath + path, opts);
         if (resp.status === 401) {
-            if (!rhIdentityMode) {
+            if (!rhIdentityMode && !openshiftOAuthMode) {
                 showLogin();
                 throw new Error('unauthorized');
             } else {
-                // In rh-identity mode, a 401 indicates an auth configuration problem
-                // Check if this is a specific rh-identity error
+                // In rh-identity or openshift-oauth mode, a 401 indicates an auth configuration problem
+                // Check if this is a specific auth error
                 try {
                     const errorData = await resp.json();
                     if (errorData.error === 'missing X-RH-Identity header' ||
                         errorData.error === 'invalid X-RH-Identity header' ||
-                        errorData.error === 'TBR identity not associated with any user') {
+                        errorData.error === 'TBR identity not associated with any user' ||
+                        errorData.error === 'missing X-Forwarded-User header' ||
+                        errorData.error === 'user provisioning failed') {
 
                         // Show appropriate error message
                         let userMessage;
@@ -50,12 +52,16 @@
                             userMessage = 'Authentication failed: identity header is malformed. Contact your administrator.';
                         } else if (errorData.error === 'TBR identity not associated with any user') {
                             userMessage = 'Authentication failed: your Token Based Registry identity is not associated with an SSO account. Visit the Account page to create an association.';
+                        } else if (errorData.error === 'missing X-Forwarded-User header') {
+                            userMessage = 'Authentication failed: no user header received. Ensure you are accessing Alcove through the OAuth Proxy.';
+                        } else if (errorData.error === 'user provisioning failed') {
+                            userMessage = 'Authentication failed: unable to provision user account. Contact your administrator.';
                         } else {
                             userMessage = 'Authentication failed: ' + errorData.error;
                         }
 
                         showAuthError(userMessage);
-                        throw new Error('rh-identity-auth-error');
+                        throw new Error('auth-error');
                     }
                 } catch (parseError) {
                     // If we can't parse the error, fall back to generic handling
@@ -93,6 +99,7 @@
     let allProfiles = [];
     let cachedCredentials = [];  // cached from last fetch for prerequisite checks
     let rhIdentityMode = false;
+    let openshiftOAuthMode = false;
     let proxyLogData = [];
     let proxyLogSortField = 'timestamp';
     let proxyLogSortAsc = true;
@@ -157,8 +164,17 @@
             localStorage.setItem('alcove_is_admin', data.is_admin ? 'true' : 'false');
             if (data.auth_backend === 'rh-identity') {
                 rhIdentityMode = true;
+                openshiftOAuthMode = false;
                 localStorage.setItem('alcove_user', data.username);
                 $('#user-info').textContent = data.username;
+            } else if (data.auth_backend === 'openshift-oauth') {
+                rhIdentityMode = false;
+                openshiftOAuthMode = true;
+                localStorage.setItem('alcove_user', data.username);
+                $('#user-info').textContent = data.username;
+            } else {
+                rhIdentityMode = false;
+                openshiftOAuthMode = false;
             }
             updateAdminUI();
             updateRHIdentityUI();
@@ -173,27 +189,33 @@
     }
 
     function updateRHIdentityUI() {
-        // Hide password change and logout buttons in rh-identity mode
+        // Hide password change and logout buttons in rh-identity or openshift-oauth mode
         var changePassBtn = $('#change-password-btn');
         var logoutBtn = $('#logout-btn');
-        if (changePassBtn) changePassBtn.hidden = rhIdentityMode;
-        if (logoutBtn) logoutBtn.hidden = rhIdentityMode;
+        if (changePassBtn) changePassBtn.hidden = rhIdentityMode || openshiftOAuthMode;
+        if (logoutBtn) logoutBtn.hidden = rhIdentityMode || openshiftOAuthMode;
 
         // Account tab is always visible — shows TBR associations for
         // rh-identity mode, personal API tokens for postgres mode.
         var accountTab = $('#account-tab');
         if (accountTab) accountTab.hidden = false;
 
-        // Show RH Identity banner in rh-identity mode (unless dismissed for session)
-        var banner = $('#rh-identity-banner');
-        var bannerDismissed = sessionStorage.getItem('alcove_rh_banner_dismissed') === 'true';
-        if (banner) {
-            banner.hidden = !rhIdentityMode || bannerDismissed;
+        // Show appropriate banner unless dismissed for session
+        var rhBanner = $('#rh-identity-banner');
+        var oauthBanner = $('#openshift-oauth-banner');
+        var rhBannerDismissed = sessionStorage.getItem('alcove_rh_banner_dismissed') === 'true';
+        var oauthBannerDismissed = sessionStorage.getItem('alcove_oauth_banner_dismissed') === 'true';
+
+        if (rhBanner) {
+            rhBanner.hidden = !rhIdentityMode || rhBannerDismissed;
+        }
+        if (oauthBanner) {
+            oauthBanner.hidden = !openshiftOAuthMode || oauthBannerDismissed;
         }
     }
 
     function isLoggedIn() {
-        return rhIdentityMode || !!localStorage.getItem('alcove_token');
+        return rhIdentityMode || openshiftOAuthMode || !!localStorage.getItem('alcove_token');
     }
 
     function isAdmin() {
@@ -309,6 +331,12 @@
         hide($('#rh-identity-banner'));
     });
 
+    // OpenShift OAuth banner dismiss
+    $('#openshift-oauth-banner-dismiss').addEventListener('click', () => {
+        sessionStorage.setItem('alcove_oauth_banner_dismissed', 'true');
+        hide($('#openshift-oauth-banner'));
+    });
+
     // System Info modal
     $('#system-info-btn').addEventListener('click', function() {
         hide($('#user-dropdown-menu'));
@@ -368,7 +396,7 @@
                 alert(data.error || data.message || 'Failed to save webhook secret.');
             }
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 alert('Failed to generate webhook secret.');
             }
         }
@@ -678,7 +706,7 @@
                         return;
                     }
                 } catch (err) {
-                    if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+                    if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                         alert('Failed to start session.');
                     }
                 }
@@ -1014,7 +1042,7 @@
                 alert(data.error || data.message || 'Failed to sync agent definitions.');
             }
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 alert('Failed to sync agent definitions.');
             }
         }
@@ -1071,7 +1099,7 @@
             titleEl.textContent = data.name || 'Agent Definition';
             contentEl.textContent = currentYamlContent || '(no YAML content)';
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 contentEl.textContent = 'Failed to load agent definition.';
             }
         }
@@ -1117,7 +1145,7 @@
             var templates = Array.isArray(data) ? data : (data.templates || data.items || []);
             renderTemplates(templates);
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 listEl.innerHTML = '<p class="error-message">Failed to load templates.</p>';
             }
         }
@@ -1211,7 +1239,7 @@
             $('#change-password-form').reset();
             setTimeout(() => hide($('#change-password-modal')), 2000);
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = 'Failed to change password.';
                 show(errEl);
             }
@@ -1453,7 +1481,7 @@
             startAutoRefresh();
         } catch (err) {
             hide(loading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--status-error);padding:24px;">Failed to load sessions. Check your connection and try again.</td></tr>';
             }
         }
@@ -1768,7 +1796,7 @@
             if (llmCreds.length === 1) select.selectedIndex = 1;
             checkTaskPrerequisites();
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 select.innerHTML = '<option value="">Failed to load providers</option>';
             }
         }
@@ -1885,7 +1913,7 @@
             renderProfileChips();
             updateEffectivePermissions();
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = err.message;
                 show(errEl);
             }
@@ -2056,7 +2084,7 @@
                             loadCredentials();
                         }
                     } catch (err) {
-                        if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+                        if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                             alert('Failed to delete credential.');
                         }
                         btn.disabled = false;
@@ -2065,7 +2093,7 @@
             });
         } catch (err) {
             hide(loading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 tbodyLlm.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--status-error);">Failed to load credentials. Check your connection and try again.</td></tr>';
                 show(sectionLlm);
             }
@@ -2425,7 +2453,7 @@
             // Hide transcript and proxy log spinners since those loads will not run
             hide($('#transcript-loading'));
             hide($('#proxy-log-loading'));
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 $('#session-meta').innerHTML = '<div class="meta-card"><div class="meta-value" style="color:var(--status-error)">Failed to load session.</div></div>';
             }
         }
@@ -2501,7 +2529,7 @@
                         cancelBtn.textContent = 'Cancel Session';
                     }
                 } catch (err) {
-                    if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+                    if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                         alert('Failed to cancel session.');
                         cancelBtn.disabled = false;
                         cancelBtn.textContent = 'Cancel Session';
@@ -3747,7 +3775,7 @@
             renderProxyLog();
         } catch (err) {
             hide(loading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 proxyLogData = [];
                 hide($('#proxy-log-filters'));
                 tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--status-error)">Failed to load proxy log.</td></tr>';
@@ -3944,7 +3972,7 @@
                         }
                         loadUsers();
                     } catch (err) {
-                        if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+                        if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                             alert('Failed to update user.');
                         }
                         btn.disabled = false;
@@ -3968,7 +3996,7 @@
                             loadUsers();
                         }
                     } catch (err) {
-                        if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+                        if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                             alert('Failed to delete user.');
                         }
                         btn.disabled = false;
@@ -3992,7 +4020,7 @@
             });
         } catch (err) {
             hide(loading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--status-error);">Failed to load users.</td></tr>';
             }
         }
@@ -4060,7 +4088,7 @@
             $('#create-user-form').reset();
             loadUsers();
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = err.message;
                 show(errEl);
             }
@@ -4110,7 +4138,7 @@
             hide(modal);
             loadUsers();
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = err.message;
                 show(errEl);
             }
@@ -4178,7 +4206,7 @@
             attachProfileCardHandlers();
         } catch (err) {
             hide(loading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 container.innerHTML = '<p style="color:var(--status-error);font-size:13px;">Failed to load profiles. Check your connection and try again.</p>';
             }
         }
@@ -4310,7 +4338,7 @@
                 select.appendChild(opt);
             });
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 select.innerHTML = '<option value="">Failed to load profiles</option>';
             }
         }
@@ -4514,7 +4542,7 @@
 
         } catch (err) {
             hide(loading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--status-error);">Failed to load tools.</td></tr>';
             }
         }
@@ -4590,7 +4618,7 @@
                 });
             });
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 content.innerHTML = '<p style="color:var(--status-error);font-size:13px;">Failed to load tools.</p>';
             }
         }
@@ -5466,7 +5494,7 @@
         } catch (err) {
             hide(definitionsLoading);
             hide(runsLoading);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 definitionsList.innerHTML = '<div class="error-message">Failed to load workflow definitions.</div>';
                 runsList.innerHTML = '<div class="error-message">Failed to load workflow runs.</div>';
             }
@@ -5534,7 +5562,7 @@
                         return;
                     }
                 } catch (err) {
-                    if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+                    if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                         alert('Failed to trigger workflow.');
                     }
                 }
@@ -5838,7 +5866,7 @@
             });
 
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 stepsList.innerHTML = '<div class="error-message">Failed to load workflow run detail.</div>';
             }
         }
@@ -6085,7 +6113,7 @@
             });
         } catch (err) {
             hide(loadingEl);
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 listEl.innerHTML = '<p class="error-message">Failed to load teams.</p>';
             }
         }
@@ -6127,7 +6155,7 @@
             await loadTeams();
             loadTeamsPage();
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = 'Failed to create team.';
                 show(errEl);
             }
@@ -6188,7 +6216,7 @@
             hide($('#team-member-success'));
 
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 $('#team-detail-content').innerHTML = '<p class="error-message">Failed to load team details.</p>';
             }
         }
@@ -6251,7 +6279,7 @@
             // Refresh team list in switcher
             await loadTeams();
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = 'Failed to update team name.';
                 show(errEl);
             }
@@ -6285,7 +6313,7 @@
             // Reload team detail
             loadTeamDetail(viewingTeamId);
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = 'Failed to add member.';
                 show(errEl);
             }
@@ -6307,7 +6335,7 @@
             }
             loadTeamDetail(teamId);
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 alert('Failed to remove member.');
             }
         }
@@ -6353,7 +6381,7 @@
             await loadTeams();
             navigate('teams');
         } catch (err) {
-            if (err.message !== 'unauthorized' && err.message !== 'rh-identity-auth-error') {
+            if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
                 errEl.textContent = 'Failed to delete team.';
                 show(errEl);
             }
@@ -6648,12 +6676,26 @@
                     const data = await resp.json();
                     if (data.auth_backend === 'rh-identity') {
                         rhIdentityMode = true;
+                        openshiftOAuthMode = false;
 
                         // Check for authentication errors
                         if (data.auth_error) {
                             showAuthError(data.auth_error_message || 'Authentication failed');
                             return;
                         }
+                    } else if (data.auth_backend === 'openshift-oauth') {
+                        rhIdentityMode = false;
+                        openshiftOAuthMode = true;
+
+                        // Check for authentication errors
+                        if (data.auth_error) {
+                            showAuthError(data.auth_error_message || 'Authentication failed');
+                            return;
+                        }
+                    } else {
+                        rhIdentityMode = false;
+                        openshiftOAuthMode = false;
+                    }
 
                         if (data.username) {
                             localStorage.setItem('alcove_user', data.username);
