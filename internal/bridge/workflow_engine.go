@@ -868,8 +868,10 @@ func (we *WorkflowEngine) checkWorkflowCompletion(ctx context.Context, run *Work
 		}
 
 		// Deadlock detection: if there are pending steps but no running
-		// steps, the remaining pending steps form a circular dependency
-		// that can never resolve. Mark them all as skipped.
+		// steps, evaluate each pending step to see if it should be dispatched
+		// or marked as skipped. This handles the race condition where parallel
+		// steps complete simultaneously and downstream steps are ready but
+		// not yet dispatched.
 		hasRunning := false
 		var pendingSteps []WorkflowRunStep
 		for _, step := range steps {
@@ -881,14 +883,107 @@ func (we *WorkflowEngine) checkWorkflowCompletion(ctx context.Context, run *Work
 				pendingSteps = append(pendingSteps, step)
 			}
 		}
-		if !hasRunning && len(pendingSteps) > 0 {
+		if !hasRunning && len(pendingSteps) > 0 && workflow != nil && stepStatuses != nil {
+			dispatchedAny := false
 			for _, step := range pendingSteps {
-				log.Printf("workflow-engine: marking deadlocked step %s as skipped (no running steps, circular dependency)", step.StepID)
-				we.updateStepStatus(ctx, run.ID, step.StepID, "skipped", nil, nil)
+				stepDef := workflow.GetStepByID(step.StepID)
+				if stepDef == nil {
+					continue
+				}
+
+				// Evaluate the step's depends expression
+				if stepDef.Depends != "" {
+					result, err := EvaluateDepends(stepDef.Depends, stepStatuses)
+					if err != nil {
+						log.Printf("workflow-engine: error evaluating depends for step %s: %v", step.StepID, err)
+						continue
+					}
+
+					if result {
+						// Dependencies are satisfied - re-check that step is still pending
+						// to avoid race with concurrent dispatch
+						currentStep, err := we.getWorkflowRunStep(ctx, run.ID, step.StepID)
+						if err != nil {
+							log.Printf("workflow-engine: error re-checking step %s status: %v", step.StepID, err)
+							continue
+						}
+						if currentStep.Status == "pending" {
+							log.Printf("workflow-engine: deadlock recovery: dispatching ready step %s", step.StepID)
+							if err := we.dispatchStep(ctx, run, stepDef, workflow); err != nil {
+								log.Printf("workflow-engine: error dispatching step %s during deadlock recovery: %v", step.StepID, err)
+							} else {
+								dispatchedAny = true
+							}
+						}
+					} else {
+						// Check if all referenced steps are terminal (genuinely unreachable)
+						referencedIDs := ExtractDependsStepIDs(stepDef.Depends)
+						allTerminal := true
+						for _, refID := range referencedIDs {
+							status, ok := stepStatuses[refID]
+							if !ok || (status != "completed" && status != "failed" && status != "skipped") {
+								allTerminal = false
+								break
+							}
+						}
+						if allTerminal {
+							log.Printf("workflow-engine: marking unreachable step %s as skipped (depends='%s' evaluates to false, all references terminal)", step.StepID, stepDef.Depends)
+							we.updateStepStatus(ctx, run.ID, step.StepID, "skipped", nil, nil)
+						}
+						// If not all terminal, leave as pending (shouldn't occur in no-running scenario, but safe)
+					}
+				} else {
+					// No depends expression - check legacy Needs
+					if len(stepDef.Needs) == 0 {
+						// No dependencies - should be dispatched
+						currentStep, err := we.getWorkflowRunStep(ctx, run.ID, step.StepID)
+						if err != nil {
+							log.Printf("workflow-engine: error re-checking step %s status: %v", step.StepID, err)
+							continue
+						}
+						if currentStep.Status == "pending" {
+							log.Printf("workflow-engine: deadlock recovery: dispatching ready step %s (no dependencies)", step.StepID)
+							if err := we.dispatchStep(ctx, run, stepDef, workflow); err != nil {
+								log.Printf("workflow-engine: error dispatching step %s during deadlock recovery: %v", step.StepID, err)
+							} else {
+								dispatchedAny = true
+							}
+						}
+					} else {
+						// Check legacy Needs
+						allCompleted := true
+						for _, needID := range stepDef.Needs {
+							status, ok := stepStatuses[needID]
+							if !ok || status != "completed" {
+								allCompleted = false
+								break
+							}
+						}
+						if allCompleted {
+							currentStep, err := we.getWorkflowRunStep(ctx, run.ID, step.StepID)
+							if err != nil {
+								log.Printf("workflow-engine: error re-checking step %s status: %v", step.StepID, err)
+								continue
+							}
+							if currentStep.Status == "pending" {
+								log.Printf("workflow-engine: deadlock recovery: dispatching ready step %s (legacy needs satisfied)", step.StepID)
+								if err := we.dispatchStep(ctx, run, stepDef, workflow); err != nil {
+									log.Printf("workflow-engine: error dispatching step %s during deadlock recovery: %v", step.StepID, err)
+								} else {
+									dispatchedAny = true
+								}
+							}
+						}
+					}
+				}
 			}
-			steps, err = we.getWorkflowRunSteps(ctx, run.ID)
-			if err != nil {
-				return fmt.Errorf("re-getting workflow run steps after deadlock resolution: %w", err)
+
+			// Re-fetch steps after dispatch attempts
+			if dispatchedAny {
+				steps, err = we.getWorkflowRunSteps(ctx, run.ID)
+				if err != nil {
+					return fmt.Errorf("re-getting workflow run steps after deadlock recovery dispatch: %w", err)
+				}
 			}
 		}
 	}
@@ -1883,6 +1978,44 @@ func (we *WorkflowEngine) getWorkflowRunSteps(ctx context.Context, runID string)
 	}
 
 	return steps, rows.Err()
+}
+
+// getWorkflowRunStep gets a single step for a workflow run by step ID.
+func (we *WorkflowEngine) getWorkflowRunStep(ctx context.Context, runID string, stepID string) (*WorkflowRunStep, error) {
+	row := we.db.QueryRow(ctx, `
+		SELECT id, run_id, step_id, session_id, status, outputs, iteration, retry_count, started_at, finished_at
+		FROM workflow_run_steps
+		WHERE run_id = $1 AND step_id = $2
+	`, runID, stepID)
+
+	var step WorkflowRunStep
+	var sessionID *string
+	var outputsJSON []byte
+	var startedAt, finishedAt *time.Time
+
+	err := row.Scan(&step.ID, &step.RunID, &step.StepID, &sessionID, &step.Status, &outputsJSON, &step.Iteration, &step.RetryCount, &startedAt, &finishedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	if sessionID != nil {
+		step.SessionID = *sessionID
+	}
+
+	if outputsJSON != nil {
+		if err := json.Unmarshal(outputsJSON, &step.Outputs); err != nil {
+			return nil, fmt.Errorf("unmarshal step outputs: %w", err)
+		}
+	}
+
+	if startedAt != nil {
+		step.StartedAt = startedAt
+	}
+	if finishedAt != nil {
+		step.FinishedAt = finishedAt
+	}
+
+	return &step, nil
 }
 
 // getStepAndRunBySessionID gets the workflow run step and run by session ID.
