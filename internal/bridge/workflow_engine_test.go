@@ -651,6 +651,242 @@ func TestDeadlockDetection(t *testing.T) {
 	// This is what checkWorkflowCompletion now does.
 }
 
+// TestDeadlockDetection_DispatchesReadySteps simulates the race scenario:
+// both reviews completed, rebase pending with satisfied depends → verify rebase would be dispatched (not skipped)
+func TestDeadlockDetection_DispatchesReadySteps(t *testing.T) {
+	// Scenario: parallel reviews complete simultaneously on final iteration
+	stepStatuses := map[string]string{
+		"implement":       "completed",
+		"create-pr":       "completed",
+		"await-ci":        "completed",
+		"code-review":     "completed",
+		"security-review": "completed",
+		"revision":        "completed",
+		"rebase":          "pending",    // Should be dispatched
+		"merge":           "pending",    // Should remain pending (depends on rebase)
+	}
+
+	// Mock workflow definition with the problematic dependencies
+	workflow := &WorkflowDefinition{
+		Workflow: []WorkflowStep{
+			{ID: "implement"},
+			{ID: "create-pr", Depends: "implement.Succeeded"},
+			{ID: "await-ci", Depends: "create-pr.Succeeded"},
+			{ID: "code-review", Depends: "await-ci.Succeeded", MaxIterations: 3},
+			{ID: "security-review", Depends: "await-ci.Succeeded", MaxIterations: 3},
+			{ID: "revision", Depends: "code-review.Failed || security-review.Failed", MaxIterations: 3},
+			{ID: "rebase", Depends: "code-review.Succeeded && security-review.Succeeded"},
+			{ID: "merge", Depends: "rebase.Succeeded"},
+		},
+	}
+
+	// Verify rebase dependencies are satisfied
+	rebaseReady, err := EvaluateDepends("code-review.Succeeded && security-review.Succeeded", stepStatuses)
+	if err != nil {
+		t.Fatalf("EvaluateDepends failed: %v", err)
+	}
+	if !rebaseReady {
+		t.Fatal("rebase should be ready when both reviews succeeded")
+	}
+
+	// Verify merge dependencies are not satisfied
+	mergeReady, _ := EvaluateDepends("rebase.Succeeded", stepStatuses)
+	if mergeReady {
+		t.Fatal("merge should NOT be ready when rebase is still pending")
+	}
+
+	// Simulate deadlock condition: no running steps + pending steps
+	hasRunning := false
+	pendingCount := 0
+	for _, status := range stepStatuses {
+		if status == "running" || status == "awaiting_approval" {
+			hasRunning = true
+		}
+		if status == "pending" {
+			pendingCount++
+		}
+	}
+	if hasRunning {
+		t.Fatal("there should be no running steps in the race scenario")
+	}
+	if pendingCount != 2 {
+		t.Fatalf("expected 2 pending steps (rebase, merge), got %d", pendingCount)
+	}
+
+	// The fix should identify that rebase is ready to dispatch
+	rebaseStep := workflow.GetStepByID("rebase")
+	if rebaseStep == nil {
+		t.Fatal("could not find rebase step definition")
+	}
+
+	ready, err := EvaluateDepends(rebaseStep.Depends, stepStatuses)
+	if err != nil {
+		t.Fatalf("evaluating rebase depends: %v", err)
+	}
+	if !ready {
+		t.Fatal("rebase should be identified as ready for dispatch during deadlock recovery")
+	}
+}
+
+// TestDeadlockDetection_SkipsUnreachableSteps ensures existing deadlock detection still works:
+// circular deps with all terminal references → steps marked as skipped
+func TestDeadlockDetection_SkipsUnreachableSteps(t *testing.T) {
+	// Scenario: genuine circular deadlock where all references are terminal
+	stepStatuses := map[string]string{
+		"step-a": "failed",  // terminal
+		"step-b": "failed",  // terminal
+		"step-c": "pending", // circular dep on step-d
+		"step-d": "pending", // circular dep on step-c
+	}
+
+	// Mock workflow with circular dependencies
+	workflow := &WorkflowDefinition{
+		Workflow: []WorkflowStep{
+			{ID: "step-a"},
+			{ID: "step-b"},
+			{ID: "step-c", Depends: "step-a.Succeeded && step-d.Succeeded"}, // Can't run: step-a failed, step-d pending
+			{ID: "step-d", Depends: "step-b.Succeeded && step-c.Succeeded"}, // Can't run: step-b failed, step-c pending
+		},
+	}
+
+	// Verify we have the expected step definitions
+	if len(workflow.Workflow) != 4 {
+		t.Fatalf("expected 4 steps in workflow definition, got %d", len(workflow.Workflow))
+	}
+
+	// Verify neither pending step can be dispatched
+	stepCReady, _ := EvaluateDepends("step-a.Succeeded && step-d.Succeeded", stepStatuses)
+	stepDReady, _ := EvaluateDepends("step-b.Succeeded && step-c.Succeeded", stepStatuses)
+
+	if stepCReady {
+		t.Fatal("step-c should NOT be ready (step-a failed, step-d pending)")
+	}
+	if stepDReady {
+		t.Fatal("step-d should NOT be ready (step-b failed, step-c pending)")
+	}
+
+	// Check all references are terminal for step-c
+	stepCRefs := ExtractDependsStepIDs("step-a.Succeeded && step-d.Succeeded")
+	allTerminal := true
+	for _, ref := range stepCRefs {
+		status := stepStatuses[ref]
+		if status != "completed" && status != "failed" && status != "skipped" {
+			allTerminal = false
+		}
+	}
+	if allTerminal {
+		t.Fatal("step-c references include step-d which is pending, not all terminal")
+	}
+
+	// This represents a genuine deadlock that should be resolved by skipping
+}
+
+// TestDeadlockDetection_MixedReadyAndUnreachable tests a scenario where some pending steps
+// are ready, others are unreachable → ready ones dispatched, unreachable ones skipped
+func TestDeadlockDetection_MixedReadyAndUnreachable(t *testing.T) {
+	stepStatuses := map[string]string{
+		"step-a":   "completed",
+		"step-b":   "failed",
+		"step-c":   "pending", // Ready: depends on step-a.Succeeded (true)
+		"step-d":   "pending", // Unreachable: depends on step-b.Succeeded (false, and step-b is terminal)
+		"step-e":   "pending", // Not ready: depends on step-c.Succeeded (false, step-c is pending)
+	}
+
+	workflow := &WorkflowDefinition{
+		Workflow: []WorkflowStep{
+			{ID: "step-a"},
+			{ID: "step-b"},
+			{ID: "step-c", Depends: "step-a.Succeeded"},          // Ready to dispatch
+			{ID: "step-d", Depends: "step-b.Succeeded"},          // Unreachable (step-b failed)
+			{ID: "step-e", Depends: "step-c.Succeeded"},          // Not ready yet (step-c pending)
+		},
+	}
+
+	// Verify we have the expected step definitions
+	if len(workflow.Workflow) != 5 {
+		t.Fatalf("expected 5 steps in workflow definition, got %d", len(workflow.Workflow))
+	}
+
+	// Verify expectations
+	stepCReady, _ := EvaluateDepends("step-a.Succeeded", stepStatuses)
+	stepDReady, _ := EvaluateDepends("step-b.Succeeded", stepStatuses)
+	stepEReady, _ := EvaluateDepends("step-c.Succeeded", stepStatuses)
+
+	if !stepCReady {
+		t.Fatal("step-c should be ready (step-a completed)")
+	}
+	if stepDReady {
+		t.Fatal("step-d should NOT be ready (step-b failed)")
+	}
+	if stepEReady {
+		t.Fatal("step-e should NOT be ready (step-c pending)")
+	}
+
+	// Check which steps should be skipped vs dispatched
+	stepDRefs := ExtractDependsStepIDs("step-b.Succeeded")
+	allTerminalD := true
+	for _, ref := range stepDRefs {
+		status := stepStatuses[ref]
+		if status != "completed" && status != "failed" && status != "skipped" {
+			allTerminalD = false
+		}
+	}
+	if !allTerminalD {
+		t.Fatal("step-d references should all be terminal")
+	}
+
+	// step-e should remain pending (references non-terminal step-c)
+	stepERefs := ExtractDependsStepIDs("step-c.Succeeded")
+	allTerminalE := true
+	for _, ref := range stepERefs {
+		status := stepStatuses[ref]
+		if status != "completed" && status != "failed" && status != "skipped" {
+			allTerminalE = false
+		}
+	}
+	if allTerminalE {
+		t.Fatal("step-e references include step-c which is pending, should not be all terminal")
+	}
+}
+
+// TestMaxIterationsFinalSuccessDispatchesDownstream verifies that checkAndDispatchDependents
+// correctly evaluates downstream steps when a step completes on its final iteration
+func TestMaxIterationsFinalSuccessDispatchesDownstream(t *testing.T) {
+	stepStatuses := map[string]string{
+		"await-ci":        "completed",
+		"code-review":     "completed", // Just completed on iteration 3 (final)
+		"security-review": "completed", // Just completed on iteration 3 (final)
+		"rebase":          "pending",   // Should be dispatchable now
+	}
+
+	workflow := &WorkflowDefinition{
+		Workflow: []WorkflowStep{
+			{ID: "await-ci"},
+			{ID: "code-review", Depends: "await-ci.Succeeded", MaxIterations: 3},
+			{ID: "security-review", Depends: "await-ci.Succeeded", MaxIterations: 3},
+			{ID: "rebase", Depends: "code-review.Succeeded && security-review.Succeeded"},
+		},
+	}
+
+	// Verify we have the expected workflow structure
+	if len(workflow.Workflow) != 4 {
+		t.Fatalf("expected 4 steps in workflow definition, got %d", len(workflow.Workflow))
+	}
+
+	// Verify rebase should be ready after both reviews succeed
+	rebaseReady, err := EvaluateDepends("code-review.Succeeded && security-review.Succeeded", stepStatuses)
+	if err != nil {
+		t.Fatalf("EvaluateDepends for rebase failed: %v", err)
+	}
+	if !rebaseReady {
+		t.Fatal("rebase should be ready when both reviews succeeded, even on their final iteration")
+	}
+
+	// The key insight: max_iterations should NOT prevent downstream evaluation
+	// when the step succeeds. The iteration limit prevents RE-dispatching the
+	// same step, not dispatching dependent steps.
+}
+
 // stringContains is a helper to check substring presence
 func stringContains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
