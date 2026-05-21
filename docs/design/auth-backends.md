@@ -2,10 +2,10 @@
 
 Date: 2026-03-26
 
-## Decision: Three Auth Backends with Explicit Selection
+## Decision: Four Auth Backends with Explicit Selection
 
-`AUTH_BACKEND=memory` (default), `AUTH_BACKEND=postgres`, or
-`AUTH_BACKEND=rh-identity`. No auto-detection.
+`AUTH_BACKEND=memory` (default), `AUTH_BACKEND=postgres`, 
+`AUTH_BACKEND=rh-identity`, or `AUTH_BACKEND=openshift-oauth`. No auto-detection.
 
 ## Interfaces
 
@@ -34,6 +34,7 @@ type UserInfo struct {
 - **MemoryStore**: current UserStore renamed. Implements Authenticator only.
 - **PgStore**: PostgreSQL-backed. Implements Authenticator + UserManager.
 - **RHIdentityStore**: Red Hat identity header-based. Implements Authenticator + UserManager.
+- **OpenShiftOAuthStore**: OpenShift OAuth Proxy header-based. Implements Authenticator + UserManager.
 
 ### RHIdentityStore
 
@@ -121,6 +122,45 @@ POST   /api/v1/auth/tbr-associations     — create new association
 DELETE /api/v1/auth/tbr-associations/{id} — remove association (user must own it)
 ```
 
+### OpenShiftOAuthStore
+
+Trusts the `X-Forwarded-User` and `X-Forwarded-Email` headers set by an OpenShift
+OAuth Proxy sidecar. This backend enables OpenShift SSO authentication without
+requiring Turnpike or the structured `X-RH-Identity` header format.
+
+#### Headers
+
+- **X-Forwarded-User**: OpenShift username (required)
+- **X-Forwarded-Email**: User email address (optional, used as display name)
+
+Key behaviors:
+
+- **JIT user provisioning:** On first request with valid headers, a user record 
+  is created in the `auth_users` table using username from X-Forwarded-User and
+  display_name from X-Forwarded-Email (if present). No password is stored.
+- **No login form:** Authentication is handled entirely by the OAuth Proxy.
+  Bridge does not render a login form or accept password-based login.
+- **No session tokens:** Each request is authenticated by the headers. Bridge
+  does not issue or validate session tokens.
+- **Admin bootstrap:** Initial admins are configured via `openshift_oauth_admins`
+  in `alcove.yaml` or `OPENSHIFT_OAUTH_ADMINS` env var (comma-separated usernames).
+  When a user matching this list is provisioned, they receive the admin flag.
+- **Admin management:** After bootstrap, existing admins can promote or demote
+  users from the dashboard (same UI as other backends).
+- **Personal team creation:** Each new user gets a personal team created automatically.
+
+#### Deployment Model
+
+The `openshift-oauth` backend requires deployment with an OAuth Proxy sidecar:
+
+1. **OAuth Proxy sidecar** runs on port 8443, handles OpenShift SSO authentication
+2. **Bridge container** runs on port 8080, trusts headers from the sidecar
+3. **OpenShift Route** targets port 8443 (OAuth Proxy), never port 8080 directly
+4. **TLS certificate** auto-provisioned via `service.alpha.openshift.io/serving-cert-secret-name`
+5. **Cookie secret** for OAuth Proxy session management
+
+This ensures header spoofing protection — the OAuth Proxy is the ONLY ingress path.
+
 ## Schema
 
 ```sql
@@ -153,6 +193,8 @@ PUT    /api/v1/users/{username}/password — change password
 - `internal/auth/memory.go` — MemoryStore (current code moved)
 - `internal/auth/postgres.go` — PgStore
 - `internal/auth/rh_identity.go` — RHIdentityStore (X-RH-Identity header auth)
+- `internal/auth/openshift_oauth.go` — OpenShiftOAuthStore (OAuth Proxy header auth)
 - `internal/auth/users_api.go` — user CRUD HTTP handlers
 - `internal/bridge/config.go` — AuthBackend field
 - `cmd/bridge/main.go` — factory, schema, route registration
+- `deploy/openshift/template-oauth.yaml` — OpenShift template with OAuth Proxy sidecar

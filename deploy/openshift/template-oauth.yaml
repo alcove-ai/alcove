@@ -1,0 +1,395 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: alcove-oauth
+  annotations:
+    description: "Alcove with OpenShift OAuth Proxy for SSO authentication"
+parameters:
+- name: BRIDGE_IMAGE
+  value: ghcr.io/alcove-ai/alcove-bridge
+- name: BRIDGE_IMAGE_TAG
+  value: latest
+- name: GATE_IMAGE
+  value: ghcr.io/alcove-ai/alcove-gate
+- name: SKIFF_IMAGE
+  value: ghcr.io/alcove-ai/alcove-skiff-base
+- name: NATS_IMAGE
+  value: docker.io/library/nats:latest
+- name: OAUTH_PROXY_IMAGE
+  value: quay.io/openshift/origin-oauth-proxy
+- name: OAUTH_PROXY_IMAGE_TAG
+  value: latest
+- name: BRIDGE_REPLICAS
+  value: "1"
+- name: AUTH_BACKEND
+  value: "openshift-oauth"
+- name: OPENSHIFT_OAUTH_ADMINS
+  value: ""
+- name: BRIDGE_LLM_PROVIDER
+  value: ""
+- name: BRIDGE_LLM_PROJECT
+  value: ""
+- name: BRIDGE_LLM_REGION
+  value: ""
+- name: CREATE_ROUTE
+  description: Whether to create an OpenShift Route for alcove-bridge
+  value: "true"
+objects:
+
+# --- ServiceAccount ---
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: alcove-bridge
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+    annotations:
+      serviceaccounts.openshift.io/oauth-redirectreference.bridge: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"alcove-bridge"}}'
+
+# --- RBAC ---
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: alcove-bridge
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+  rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: alcove-bridge
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: alcove-bridge
+  subjects:
+  - kind: ServiceAccount
+    name: alcove-bridge
+
+# --- OAuth Cookie Secret ---
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: alcove-oauth-cookie-secret
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+  type: Opaque
+  data:
+    cookie-secret: ${OAUTH_COOKIE_SECRET:Y2hhbmdlbWVwbGVhc2UjI2xvcmVtaXBzdW0=}
+
+# --- Bridge Deployment with OAuth Proxy ---
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: alcove-bridge
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+  spec:
+    replicas: ${{BRIDGE_REPLICAS}}
+    selector:
+      matchLabels:
+        app.kubernetes.io/name: bridge
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: bridge
+          app.kubernetes.io/part-of: alcove
+        annotations:
+          service.alpha.openshift.io/serving-cert-secret-name: alcove-bridge-tls
+      spec:
+        serviceAccountName: alcove-bridge
+        containers:
+        # OAuth Proxy sidecar
+        - name: oauth-proxy
+          image: ${OAUTH_PROXY_IMAGE}:${OAUTH_PROXY_IMAGE_TAG}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          ports:
+          - containerPort: 8443
+            name: https
+            protocol: TCP
+          args:
+          - --https-address=:8443
+          - --provider=openshift
+          - --openshift-service-account=alcove-bridge
+          - --upstream=http://localhost:8080
+          - --tls-cert=/etc/tls/private/tls.crt
+          - --tls-key=/etc/tls/private/tls.key
+          - --cookie-secret-file=/etc/oauth-proxy/cookie-secret
+          - --pass-user-headers=true
+          - --pass-access-token=false
+          - --skip-provider-button=true
+          - --openshift-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          volumeMounts:
+          - name: oauth-cookie-secret
+            mountPath: /etc/oauth-proxy
+            readOnly: true
+          - name: bridge-tls
+            mountPath: /etc/tls/private
+            readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+        # Bridge container
+        - name: bridge
+          image: ${BRIDGE_IMAGE}:${BRIDGE_IMAGE_TAG}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          ports:
+          - containerPort: 8080
+            name: http
+            protocol: TCP
+          env:
+          - name: RUNTIME
+            value: "kubernetes"
+          - name: ALCOVE_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: HAIL_URL
+            value: "nats://alcove-hail:4222"
+          - name: AUTH_BACKEND
+            value: ${AUTH_BACKEND}
+          - name: OPENSHIFT_OAUTH_ADMINS
+            value: ${OPENSHIFT_OAUTH_ADMINS}
+          - name: GATE_IMAGE
+            value: ${GATE_IMAGE}
+          - name: BRIDGE_URL
+            value: "http://alcove-bridge:8080"
+          - name: SKIFF_IMAGE
+            value: ${SKIFF_IMAGE}
+          - name: LEDGER_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: alcove-config
+                key: ledger-database-url
+          - name: ALCOVE_DATABASE_ENCRYPTION_KEY
+            valueFrom:
+              secretKeyRef:
+                name: alcove-config
+                key: database-encryption-key
+          - name: BRIDGE_LLM_PROVIDER
+            value: ${BRIDGE_LLM_PROVIDER}
+          - name: BRIDGE_LLM_PROJECT
+            value: ${BRIDGE_LLM_PROJECT}
+          - name: BRIDGE_LLM_REGION
+            value: ${BRIDGE_LLM_REGION}
+          - name: GOOGLE_APPLICATION_CREDENTIALS
+            value: "/etc/alcove/gcloud/service-account-json"
+          volumeMounts:
+          - name: vertex-ai-credentials
+            mountPath: "/etc/alcove/gcloud/"
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - name: vertex-ai-credentials
+          secret:
+            secretName: alcove-vertex-ai
+            optional: true
+        - name: oauth-cookie-secret
+          secret:
+            secretName: alcove-oauth-cookie-secret
+        - name: bridge-tls
+          secret:
+            secretName: alcove-bridge-tls
+
+# --- NATS (Hail) Deployment ---
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: alcove-hail
+    labels:
+      app.kubernetes.io/name: hail
+      app.kubernetes.io/part-of: alcove
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app.kubernetes.io/name: hail
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: hail
+          app.kubernetes.io/part-of: alcove
+      spec:
+        containers:
+        - name: nats
+          image: ${NATS_IMAGE}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          ports:
+          - containerPort: 4222
+            name: nats
+            protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: 4222
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: 4222
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+# --- Services ---
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: alcove-bridge
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+    annotations:
+      service.alpha.openshift.io/serving-cert-secret-name: alcove-bridge-tls
+  spec:
+    type: ClusterIP
+    selector:
+      app.kubernetes.io/name: bridge
+    ports:
+    - port: 8443
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: alcove-hail
+    labels:
+      app.kubernetes.io/name: hail
+      app.kubernetes.io/part-of: alcove
+  spec:
+    type: ClusterIP
+    selector:
+      app.kubernetes.io/name: hail
+    ports:
+    - port: 4222
+      targetPort: 4222
+      protocol: TCP
+      name: nats
+
+# --- Route (targets OAuth Proxy on port 8443) ---
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: alcove-bridge
+    labels:
+      app.kubernetes.io/name: bridge
+      app.kubernetes.io/part-of: alcove
+  spec:
+    port:
+      targetPort: 8443
+    to:
+      kind: Service
+      name: alcove-bridge
+      weight: 100
+    tls:
+      termination: reencrypt
+      destinationCACertificate: |
+        -----BEGIN CERTIFICATE-----
+        -----END CERTIFICATE-----
+  condition: ${CREATE_ROUTE}
+
+# --- NetworkPolicies ---
+# All policies are scoped to Alcove pods only (app.kubernetes.io/part-of: alcove)
+# to avoid affecting other applications in the shared namespace.
+# Note: alcove-allow-internal declares both Ingress and Egress policyTypes,
+# this allows Alcove pods to communicate with each other and the control plane
+# while still protecting them from other apps in a shared namespace.
+- apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: alcove-allow-internal
+    labels:
+      app.kubernetes.io/part-of: alcove
+  spec:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: alcove
+    policyTypes:
+    - Ingress
+    - Egress
+    ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/part-of: alcove
+      - namespaceSelector: {}  # Allow ingress from all namespaces (for Routes)
+    egress:
+    - {}  # Allow all egress for simplicity

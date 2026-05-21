@@ -81,7 +81,8 @@ alcove/
 │       ├── auth.go             ✅ Authenticator + UserManager interfaces, Argon2id passwords, LoginHandler, AuthMiddleware, admin role checks, streaming query-param token fallback
 │       ├── memory.go           ✅ MemoryStore: in-memory auth backend with rate limiting
 │       ├── postgres.go         ✅ PgStore: PostgreSQL-backed auth with user CRUD, admin flag, session persistence, expired session cleanup, password change
-│       ├── rh_identity.go      ✅ RHIdentityStore: X-RH-Identity header auth, JIT user provisioning, admin bootstrap
+│       ├── rh_identity.go      ✅ RHIdentityStore: X-RH-Identity header auth, JIT user provisioning, admin bootstrap, TBR identity association
+│       ├── openshift_oauth.go  ✅ OpenShiftOAuthStore: X-Forwarded-User/X-Forwarded-Email header auth from OAuth Proxy, JIT user provisioning, admin bootstrap
 │       └── users_api.go        ✅ User management HTTP handlers (list, create, delete, change password, set admin role)
 ├── web/
 │   ├── index.html              ✅ Dashboard SPA shell with all page views, setup checklist
@@ -101,9 +102,16 @@ alcove/
 │       ├── architecture-decisions.md   ✅ 24 resolved decisions
 │       ├── problem-statement.md        ✅ Why ephemeral agents
 │       ├── credential-management.md    ✅ Credential storage and token flow design
-│       ├── auth-backends.md            ✅ Dual auth backend design
+│       ├── auth-backends.md            ✅ Four auth backend design (memory, postgres, rh-identity, openshift-oauth)
 │       ├── mcp-tool-gateway.md         ✅ MCP tool gateway design
 │       └── security-profiles-and-system-llm.md  ✅ Security profiles and system LLM design
+├── deploy/
+│   └── openshift/
+│       ├── template.yaml           ✅ OpenShift template for standard deployment
+│       └── template-oauth.yaml     ✅ OpenShift template with OAuth Proxy sidecar for SSO
+├── docs/
+│   └── deployment/
+│       └── openshift-sso.md        ✅ OpenShift SSO deployment guide
 ├── Makefile                    ✅ build, build-images, up, down, logs, dev-up, dev-infra, dev-down, dev-logs, dev-reset, test, lint
 ├── LICENSE                     ✅ Apache-2.0
 ├── go.mod                      ✅ github.com/alcove-ai/alcove (Go 1.25)
