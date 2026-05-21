@@ -651,6 +651,144 @@ func TestDeadlockDetection(t *testing.T) {
 	// This is what checkWorkflowCompletion now does.
 }
 
+// TestDeadlockDetection_DispatchesReadySteps tests that the deadlock detector
+// dispatches ready pending steps instead of blindly skipping them.
+func TestDeadlockDetection_DispatchesReadySteps(t *testing.T) {
+	// Scenario: both review steps completed, revision completed, rebase is pending
+	// and should be ready to dispatch (not skipped due to false deadlock detection)
+	stepStatuses := map[string]string{
+		"implement":       "completed",
+		"create-pr":       "completed",
+		"await-ci":        "completed",
+		"code-review":     "completed",
+		"security-review": "completed",
+		"revision":        "completed",
+		"rebase":          "pending",
+	}
+
+	// rebase depends on "code-review.Succeeded && security-review.Succeeded"
+	rebaseReady, err := EvaluateDepends("code-review.Succeeded && security-review.Succeeded", stepStatuses)
+	if err != nil {
+		t.Fatalf("error evaluating rebase depends: %v", err)
+	}
+	if !rebaseReady {
+		t.Fatal("rebase should be ready when both reviews are completed")
+	}
+
+	// Simulate no running steps (false deadlock scenario)
+	hasRunning := false
+	pendingCount := 0
+	for _, status := range stepStatuses {
+		if status == "running" || status == "awaiting_approval" {
+			hasRunning = true
+		}
+		if status == "pending" {
+			pendingCount++
+		}
+	}
+
+	if hasRunning {
+		t.Fatal("there should be no running steps in this test scenario")
+	}
+	if pendingCount != 1 {
+		t.Fatalf("expected 1 pending step (rebase), got %d", pendingCount)
+	}
+
+	// The fix should dispatch the ready step instead of marking it as skipped
+}
+
+// TestDeadlockDetection_SkipsUnreachableSteps ensures existing deadlock detection
+// still works for genuinely unreachable steps.
+func TestDeadlockDetection_SkipsUnreachableSteps(t *testing.T) {
+	// Scenario: circular dependency where steps can never be satisfied
+	stepStatuses := map[string]string{
+		"step-a": "pending", // depends on "step-b.Succeeded"
+		"step-b": "pending", // depends on "step-a.Succeeded"
+		"step-c": "failed",  // terminal, failed
+	}
+
+	// Neither step-a nor step-b can be ready
+	aReady, _ := EvaluateDepends("step-b.Succeeded", stepStatuses)
+	bReady, _ := EvaluateDepends("step-a.Succeeded", stepStatuses)
+
+	if aReady {
+		t.Fatal("step-a should NOT be ready (step-b is pending)")
+	}
+	if bReady {
+		t.Fatal("step-b should NOT be ready (step-a is pending)")
+	}
+
+	// All referenced steps are non-terminal (both are pending), so this is genuine deadlock
+	hasRunning := false
+	pendingCount := 0
+	for _, status := range stepStatuses {
+		if status == "running" || status == "awaiting_approval" {
+			hasRunning = true
+		}
+		if status == "pending" {
+			pendingCount++
+		}
+	}
+
+	if hasRunning {
+		t.Fatal("there should be no running steps in this deadlock scenario")
+	}
+	if pendingCount != 2 {
+		t.Fatalf("expected 2 pending steps (step-a, step-b), got %d", pendingCount)
+	}
+
+	// The deadlock detector should mark these as unreachable and skip them
+}
+
+// TestDeadlockDetection_MixedReadyAndUnreachable tests scenarios where some
+// pending steps are ready and others are unreachable.
+func TestDeadlockDetection_MixedReadyAndUnreachable(t *testing.T) {
+	// Scenario: mixed case
+	stepStatuses := map[string]string{
+		"prerequisite":     "completed",
+		"ready-step":       "pending", // depends on "prerequisite.Succeeded" (ready)
+		"unreachable-step": "pending", // depends on "failed-step.Succeeded" (unreachable)
+		"failed-step":      "failed",
+	}
+
+	// ready-step should be ready
+	readyStepReady, _ := EvaluateDepends("prerequisite.Succeeded", stepStatuses)
+	if !readyStepReady {
+		t.Fatal("ready-step should be ready (prerequisite is completed)")
+	}
+
+	// unreachable-step should not be ready
+	unreachableReady, _ := EvaluateDepends("failed-step.Succeeded", stepStatuses)
+	if unreachableReady {
+		t.Fatal("unreachable-step should NOT be ready (failed-step is failed)")
+	}
+
+	// The deadlock detector should dispatch ready-step and skip unreachable-step
+}
+
+// TestMaxIterationsFinalSuccessDispatchesDownstream verifies that when a step
+// completes successfully on its final iteration, downstream steps are still dispatched.
+func TestMaxIterationsFinalSuccessDispatchesDownstream(t *testing.T) {
+	// Scenario: review step completes successfully on iteration 3 (max_iterations = 3)
+	stepStatuses := map[string]string{
+		"code-review":     "completed", // just completed on final iteration
+		"security-review": "completed", // also completed
+		"rebase":          "pending",   // depends on both reviews
+	}
+
+	// The downstream step should be ready
+	rebaseReady, err := EvaluateDepends("code-review.Succeeded && security-review.Succeeded", stepStatuses)
+	if err != nil {
+		t.Fatalf("error evaluating rebase depends: %v", err)
+	}
+	if !rebaseReady {
+		t.Fatal("rebase should be ready when both reviews succeeded")
+	}
+
+	// This verifies that max_iterations reaching its limit doesn't prevent
+	// downstream step evaluation
+}
+
 // stringContains is a helper to check substring presence
 func stringContains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {

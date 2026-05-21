@@ -868,8 +868,8 @@ func (we *WorkflowEngine) checkWorkflowCompletion(ctx context.Context, run *Work
 		}
 
 		// Deadlock detection: if there are pending steps but no running
-		// steps, the remaining pending steps form a circular dependency
-		// that can never resolve. Mark them all as skipped.
+		// steps, check if any pending steps can be dispatched. If they can,
+		// dispatch them. If they can't (circular dependency), mark them as skipped.
 		hasRunning := false
 		var pendingSteps []WorkflowRunStep
 		for _, step := range steps {
@@ -882,9 +882,78 @@ func (we *WorkflowEngine) checkWorkflowCompletion(ctx context.Context, run *Work
 			}
 		}
 		if !hasRunning && len(pendingSteps) > 0 {
+			// Try to dispatch ready pending steps instead of blindly skipping them all
 			for _, step := range pendingSteps {
-				log.Printf("workflow-engine: marking deadlocked step %s as skipped (no running steps, circular dependency)", step.StepID)
-				we.updateStepStatus(ctx, run.ID, step.StepID, "skipped", nil, nil)
+				// Get the step definition from workflow
+				stepDef := workflow.GetStepByID(step.StepID)
+				if stepDef == nil {
+					log.Printf("workflow-engine: step definition not found for step %s, marking as skipped", step.StepID)
+					we.updateStepStatus(ctx, run.ID, step.StepID, "skipped", nil, nil)
+					continue
+				}
+
+				// Evaluate the step's depends expression
+				var ready bool
+				var err error
+				if stepDef.Depends != "" {
+					ready, err = EvaluateDepends(stepDef.Depends, stepStatuses)
+					if err != nil {
+						log.Printf("workflow-engine: error evaluating depends for step %s: %v, marking as skipped", step.StepID, err)
+						we.updateStepStatus(ctx, run.ID, step.StepID, "skipped", nil, nil)
+						continue
+					}
+				} else if len(stepDef.Needs) > 0 {
+					// Legacy: check if all Needs are completed.
+					ready = true
+					for _, dep := range stepDef.Needs {
+						depStatus, exists := stepStatuses[dep]
+						if !exists || depStatus != "completed" {
+							ready = false
+							break
+						}
+					}
+				} else {
+					// No dependencies, ready to run
+					ready = true
+				}
+
+				if ready {
+					// Re-check step status is still "pending" to avoid race conditions
+					currentStatus, err := we.getStepStatus(ctx, run.ID, step.StepID)
+					if err != nil {
+						log.Printf("workflow-engine: error checking current status for step %s: %v", step.StepID, err)
+						continue
+					}
+					if currentStatus == "pending" {
+						log.Printf("workflow-engine: deadlock recovery: dispatching ready step %s", step.StepID)
+						if err := we.dispatchStep(ctx, run, stepDef, workflow); err != nil {
+							log.Printf("workflow-engine: failed to dispatch step %s during deadlock recovery: %v", step.StepID, err)
+						}
+					}
+				} else {
+					// Check if this step is genuinely unreachable (all referenced steps are terminal)
+					var referencedSteps []string
+					if stepDef.Depends != "" {
+						referencedSteps = ExtractDependsStepIDs(stepDef.Depends)
+					} else {
+						referencedSteps = stepDef.Needs
+					}
+
+					allTerminal := true
+					for _, ref := range referencedSteps {
+						refStatus, exists := stepStatuses[ref]
+						if !exists || (refStatus != "completed" && refStatus != "failed" && refStatus != "skipped") {
+							allTerminal = false
+							break
+						}
+					}
+
+					if allTerminal {
+						log.Printf("workflow-engine: marking unreachable step %s as skipped (depends='%s' evaluates to false, all references terminal)", step.StepID, stepDef.Depends)
+						we.updateStepStatus(ctx, run.ID, step.StepID, "skipped", nil, nil)
+					}
+					// If not all references are terminal, leave as pending (shouldn't occur in no-running scenario, but safe)
+				}
 			}
 			steps, err = we.getWorkflowRunSteps(ctx, run.ID)
 			if err != nil {
