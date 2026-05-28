@@ -165,6 +165,7 @@ alcove workflows runs --team "Alcove Development"                  # list workfl
 alcove workflows runs --team "Alcove Development" --status running  # only active runs
 alcove workflows run <workflow-id> --team "Alcove Development"     # manually trigger a workflow
 alcove workflows cancel <run-id> --team "Alcove Development"       # cancel a running workflow
+alcove workflows export <run-id> --team "Alcove Development"       # export run data and transcripts
 ```
 
 ### Other Commands

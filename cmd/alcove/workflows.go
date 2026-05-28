@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -86,6 +87,7 @@ func newWorkflowsCmd() *cobra.Command {
 		newWorkflowsRunCmd(),
 		newWorkflowsRunsCmd(),
 		newWorkflowsCancelCmd(),
+		newWorkflowsExportCmd(),
 	)
 	return cmd
 }
@@ -409,5 +411,240 @@ func runWorkflowsCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Workflow run %s has been cancelled\n", runID)
+	return nil
+}
+
+// ---------- workflows export ----------
+
+// workflowRunStep represents a single step from the API response.
+type workflowRunStep struct {
+	ID            string                 `json:"id"`
+	RunID         string                 `json:"run_id"`
+	StepID        string                 `json:"step_id"`
+	SessionID     string                 `json:"session_id,omitempty"`
+	Status        string                 `json:"status"`
+	Outputs       map[string]interface{} `json:"outputs,omitempty"`
+	Iteration     int                    `json:"iteration"`
+	RetryCount    int                    `json:"retry_count"`
+	StartedAt     *string                `json:"started_at,omitempty"`
+	FinishedAt    *string                `json:"finished_at,omitempty"`
+	Type          string                 `json:"type,omitempty"`
+	Action        string                 `json:"action,omitempty"`
+	Depends       string                 `json:"depends,omitempty"`
+	MaxIterations int                    `json:"max_iterations,omitempty"`
+	Credentials   map[string]string      `json:"credentials,omitempty"`
+}
+
+// workflowRunDetail is the response from GET /api/v1/workflow-runs/{id}.
+type workflowRunDetail struct {
+	WorkflowRun workflowRunInfo   `json:"workflow_run"`
+	Steps       []workflowRunStep `json:"steps"`
+}
+
+// sessionTranscript is the response from GET /api/v1/sessions/{id}/transcript.
+type sessionTranscript struct {
+	SessionID  string          `json:"session_id"`
+	Transcript json.RawMessage `json:"transcript"`
+}
+
+func newWorkflowsExportCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "export <run-id>",
+		Short: "Export workflow run data and session transcripts",
+		Long: `Export a workflow run's metadata and all associated session transcripts to a structured directory.
+
+This command fetches the full workflow run metadata and downloads session transcripts
+for all agent steps, organizing them in a directory structure suitable for offline
+analysis tools like RAKI.
+
+Examples:
+  alcove workflows export ab12cd34-5678-90ef-abcd-123456789012
+  alcove workflows export ab12cd34-5678-90ef-abcd-123456789012 --output-dir ./my-export/`,
+		Args: cobra.ExactArgs(1),
+		RunE: runWorkflowsExport,
+	}
+	cmd.Flags().String("output-dir", "", "Output directory (default: ./alcove-export-<short-id>/)")
+	return cmd
+}
+
+func runWorkflowsExport(cmd *cobra.Command, args []string) error {
+	runID := args[0]
+	outputDir, _ := cmd.Flags().GetString("output-dir")
+
+	// Fetch workflow run details
+	resp, err := apiRequest(cmd, http.MethodGet, "/api/v1/workflow-runs/"+runID, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return formatAPIError("fetching workflow run", resp.StatusCode, body)
+	}
+
+	var runDetail workflowRunDetail
+	if err := json.NewDecoder(resp.Body).Decode(&runDetail); err != nil {
+		return fmt.Errorf("decoding workflow run response: %w", err)
+	}
+
+	// Determine output directory
+	if outputDir == "" {
+		shortID := runID
+		if len(runID) > 8 {
+			shortID = runID[:8]
+		}
+		outputDir = fmt.Sprintf("./alcove-export-%s", shortID)
+	}
+
+	// Check if directory exists and is non-empty
+	if info, err := os.Stat(outputDir); err == nil {
+		if info.IsDir() {
+			entries, err := os.ReadDir(outputDir)
+			if err == nil && len(entries) > 0 {
+				return fmt.Errorf("output directory %s already exists and is not empty", outputDir)
+			}
+		} else {
+			return fmt.Errorf("output path %s exists but is not a directory", outputDir)
+		}
+	}
+
+	// Create output directory
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+
+	// Write run.json (full workflow run metadata + all steps)
+	runFile := filepath.Join(outputDir, "run.json")
+	runData, err := json.MarshalIndent(runDetail, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling run data: %w", err)
+	}
+	if err := os.WriteFile(runFile, runData, 0644); err != nil {
+		return fmt.Errorf("writing run.json: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Exporting workflow run %s to %s...\n", runID, outputDir)
+
+	transcriptCount := 0
+	bridgeCount := 0
+
+	// Process each step
+	for i, step := range runDetail.Steps {
+		stepNum := fmt.Sprintf("%02d", i+1)
+		sanitizedStepID := sanitizeStepID(step.StepID)
+		stepDir := filepath.Join(outputDir, fmt.Sprintf("%s-%s", stepNum, sanitizedStepID))
+
+		if err := os.MkdirAll(stepDir, 0755); err != nil {
+			return fmt.Errorf("creating step directory %s: %w", stepDir, err)
+		}
+
+		if step.SessionID != "" {
+			// Agent step with transcript
+			fmt.Fprintf(os.Stderr, "  Fetching transcript for step %s (%s)...\n", step.StepID, step.SessionID)
+
+			if err := fetchTranscript(cmd, step.SessionID, stepDir); err != nil {
+				// Don't fail the entire export, just warn and write error file
+				fmt.Fprintf(os.Stderr, "  Warning: failed to fetch transcript for session %s: %v\n", step.SessionID, err)
+
+				errorData := map[string]interface{}{
+					"error":      err.Error(),
+					"session_id": step.SessionID,
+					"step_id":    step.StepID,
+				}
+				errorJSON, _ := json.MarshalIndent(errorData, "", "  ")
+				errorFile := filepath.Join(stepDir, "transcript_error.json")
+				os.WriteFile(errorFile, errorJSON, 0644)
+			} else {
+				transcriptCount++
+			}
+		} else {
+			// Bridge/skipped step with just metadata
+			stepData, err := json.MarshalIndent(step, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshaling step data for %s: %w", step.StepID, err)
+			}
+			stepFile := filepath.Join(stepDir, "step.json")
+			if err := os.WriteFile(stepFile, stepData, 0644); err != nil {
+				return fmt.Errorf("writing step.json for %s: %w", step.StepID, err)
+			}
+			bridgeCount++
+		}
+	}
+
+	// Print summary to stderr and output directory to stdout
+	fmt.Fprintf(os.Stderr, "Exported %d steps (%d transcripts, %d bridge/skipped) to %s\n",
+		len(runDetail.Steps), transcriptCount, bridgeCount, outputDir)
+	fmt.Println(outputDir)
+
+	return nil
+}
+
+// sanitizeStepID removes path-unsafe characters from step IDs for directory naming.
+func sanitizeStepID(stepID string) string {
+	// Convert to string and process character by character
+	result := strings.Builder{}
+	result.Grow(len(stepID))
+
+	for _, r := range stepID {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_':
+			// Keep safe characters
+			result.WriteRune(r)
+		default:
+			// Replace unsafe characters with underscore
+			result.WriteRune('_')
+		}
+	}
+
+	sanitized := result.String()
+
+	// Replace sequences of dots that could be path traversal attempts
+	sanitized = strings.ReplaceAll(sanitized, "..", "_")
+
+	// Remove leading/trailing underscores and dashes, and limit length
+	sanitized = strings.Trim(sanitized, "_-")
+	if len(sanitized) > 50 {
+		sanitized = sanitized[:50]
+		// Trim again in case we cut in the middle of trailing chars
+		sanitized = strings.Trim(sanitized, "_-")
+	}
+	if sanitized == "" {
+		sanitized = "unknown"
+	}
+
+	return sanitized
+}
+
+// fetchTranscript downloads a session transcript and writes it to the step directory.
+func fetchTranscript(cmd *cobra.Command, sessionID, stepDir string) error {
+	// Use the standard API request flow with extended timeout
+	resp, err := apiRequest(cmd, http.MethodGet, "/api/v1/sessions/"+sessionID+"/transcript", nil)
+	if err != nil {
+		return fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("transcript not found (session may have been deleted)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return formatAPIError("fetching transcript", resp.StatusCode, body)
+	}
+
+	// Write transcript directly to file to avoid memory pressure
+	transcriptFile := filepath.Join(stepDir, "transcript.json")
+	outFile, err := os.Create(transcriptFile)
+	if err != nil {
+		return fmt.Errorf("creating transcript file: %w", err)
+	}
+	defer outFile.Close()
+
+	// Stream response body directly to file
+	if _, err := io.Copy(outFile, resp.Body); err != nil {
+		return fmt.Errorf("writing transcript file: %w", err)
+	}
+
 	return nil
 }
