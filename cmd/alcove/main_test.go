@@ -886,3 +886,71 @@ func TestFormatAPIError(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizeStepID(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal step id",
+			input:    "claim-issue",
+			expected: "claim-issue",
+		},
+		{
+			name:     "step id with slashes",
+			input:    "folder/step-id",
+			expected: "folder_step-id",
+		},
+		{
+			name:     "step id with dangerous chars",
+			input:    "step/with\\dangerous:chars*and?quotes<>|",
+			expected: "step_with_dangerous_chars_and_quotes",
+		},
+		{
+			name:     "step id with dots",
+			input:    "step.with.dots",
+			expected: "step_with_dots",
+		},
+		{
+			name:     "step id with spaces",
+			input:    "step with spaces",
+			expected: "step_with_spaces",
+		},
+		{
+			name:     "step id with consecutive dangerous chars",
+			input:    "step///with\\\\\\many:::chars",
+			expected: "step_with_many_chars",
+		},
+		{
+			name:     "step id with leading/trailing underscores after sanitization",
+			input:    "/step/",
+			expected: "step",
+		},
+		{
+			name:     "empty step id",
+			input:    "",
+			expected: "unknown",
+		},
+		{
+			name:     "only dangerous chars",
+			input:    "/\\:*?\"<>|",
+			expected: "unknown",
+		},
+		{
+			name:     "path traversal attempt",
+			input:    "../../../etc/passwd",
+			expected: "etc_passwd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeStepID(tt.input)
+			if result != tt.expected {
+				t.Errorf("sanitizeStepID(%q) = %q, expected %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
