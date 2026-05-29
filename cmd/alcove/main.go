@@ -107,6 +107,7 @@ func main() {
 		newAgentsCmd(),
 		newWorkflowsCmd(),
 		newVersionCmd(),
+		newWhoamiCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -1946,6 +1947,167 @@ func getServerVersion(cmd *cobra.Command) (string, error) {
 	}
 
 	return healthResp.Version, nil
+}
+
+// ---------- whoami ----------
+
+func newWhoamiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "whoami",
+		Short: "Show current user identity and configuration context",
+		Long:  "Display the current user identity, server, profile, team, and authentication method.",
+		RunE:  runWhoami,
+	}
+}
+
+type whoamiInfo struct {
+	User     string `json:"user"`
+	Server   string `json:"server"`
+	Profile  string `json:"profile"`
+	Team     string `json:"team"`
+	Auth     string `json:"auth"`
+	IsAdmin  bool   `json:"is_admin,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func runWhoami(cmd *cobra.Command, _ []string) error {
+	info := whoamiInfo{}
+
+	// Resolve local configuration
+	profile, err := resolveProfile(cmd)
+	if err != nil {
+		// No config found
+		if isJSONOutput(cmd) {
+			return outputJSON(map[string]string{
+				"error": "not configured - run 'alcove login' to get started",
+			})
+		}
+		fmt.Fprintln(os.Stderr, "Not configured - run 'alcove login' to get started")
+		return nil
+	}
+
+	// Determine profile name
+	profileName, _ := cmd.Flags().GetString("profile")
+	if profileName == "" {
+		profileName = os.Getenv("ALCOVE_PROFILE")
+	}
+	if profileName == "" {
+		if cfg, err := loadConfig(); err == nil {
+			profileName = cfg.ActiveProfile
+		}
+	}
+	if profileName == "" {
+		profileName = "<default>"
+	}
+	info.Profile = profileName
+
+	// Resolve server URL (use profile for consistency)
+	info.Server = profile.Server
+	if info.Server == "" {
+		if server, err := resolveServer(cmd); err == nil {
+			info.Server = server
+		} else {
+			info.Server = "<not configured>"
+		}
+	}
+
+	// Resolve team name
+	teamName := resolveTeamName(cmd)
+	if teamName == "" {
+		info.Team = "<none>"
+	} else {
+		info.Team = teamName
+	}
+
+	// Determine auth method (use profile for consistency)
+	if profile.Username != "" {
+		info.Auth = "Basic Auth"
+		info.User = profile.Username // We have local username for Basic Auth
+	} else if token, err := loadToken(); err == nil && token != "" {
+		info.Auth = "Bearer Token"
+	} else {
+		info.Auth = "<none>"
+		info.User = "<unknown>"
+	}
+
+	// Try to get server identity via /api/v1/auth/me
+	if info.Server != "<not configured>" {
+		if serverUser, isAdmin, authErr := getServerIdentity(cmd); authErr != nil {
+			// Server unreachable - show what we can from local config
+			if info.User == "" {
+				info.User = "<unknown> (server unreachable)"
+			}
+			info.Error = "server unreachable"
+		} else {
+			// Server responded successfully
+			info.User = serverUser
+			info.IsAdmin = isAdmin
+		}
+	} else {
+		if info.User == "" {
+			info.User = "<unknown>"
+		}
+	}
+
+	if isJSONOutput(cmd) {
+		return outputJSON(info)
+	}
+
+	// Table output
+	fmt.Fprintf(os.Stdout, "User:     %s", info.User)
+	if info.IsAdmin {
+		fmt.Fprintf(os.Stdout, " (admin)")
+	}
+	if info.Error != "" {
+		fmt.Fprintf(os.Stdout, " (%s)", info.Error)
+	}
+	fmt.Fprintln(os.Stdout)
+
+	fmt.Fprintf(os.Stdout, "Server:   %s\n", info.Server)
+	fmt.Fprintf(os.Stdout, "Profile:  %s\n", info.Profile)
+
+	fmt.Fprintf(os.Stdout, "Team:     %s", info.Team)
+	if info.Team == "<none>" {
+		fmt.Fprintf(os.Stdout, " (use --team or alcove config set-team)")
+	}
+	fmt.Fprintln(os.Stdout)
+
+	fmt.Fprintf(os.Stdout, "Auth:     %s\n", info.Auth)
+
+	return nil
+}
+
+// getServerIdentity calls /api/v1/auth/me to get server-side identity information.
+// Returns username, isAdmin, and any error.
+func getServerIdentity(cmd *cobra.Command) (string, bool, error) {
+	resp, err := apiRequestRaw(cmd, http.MethodGet, "/api/v1/auth/me", nil, "")
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", false, formatAPIError("fetching user identity", resp.StatusCode, body)
+	}
+
+	var result struct {
+		Username    string `json:"username"`
+		IsAdmin     bool   `json:"is_admin"`
+		AuthBackend string `json:"auth_backend"`
+		AuthError   string `json:"auth_error,omitempty"`
+		AuthErrorMessage string `json:"auth_error_message,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", false, fmt.Errorf("decoding identity response: %w", err)
+	}
+
+	// Check for auth errors (mainly for rh-identity backend)
+	if result.AuthError != "" {
+		return "", false, fmt.Errorf("auth error: %s (%s)", result.AuthError, result.AuthErrorMessage)
+	}
+
+	return result.Username, result.IsAdmin, nil
 }
 
 // ---------- SSE streaming ----------

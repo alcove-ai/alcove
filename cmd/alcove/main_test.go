@@ -945,12 +945,145 @@ func TestSanitizeStepID(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := sanitizeStepID(tt.input)
-			if result != tt.expected {
-				t.Errorf("sanitizeStepID(%q) = %q, expected %q", tt.input, result, tt.expected)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := sanitizeStepID(tt.input)
+				if result != tt.expected {
+					t.Errorf("sanitizeStepID(%q) = %q, expected %q", tt.input, result, tt.expected)
+				}
+			})
+		}
+	}
+
+	func TestWhoamiOutput(t *testing.T) {
+		// Create a test command with proper flags
+		createTestCommand := func() *cobra.Command {
+			cmd := &cobra.Command{}
+			cmd.PersistentFlags().String("team", "", "")
+			cmd.PersistentFlags().String("profile", "", "")
+			cmd.PersistentFlags().String("output", "", "")
+			cmd.PersistentFlags().String("server", "", "")
+			cmd.PersistentFlags().String("username", "", "")
+			cmd.PersistentFlags().String("password", "", "")
+			return cmd
+		}
+
+		t.Run("no config file", func(t *testing.T) {
+			// Setup isolated config environment with no config file
+			setupConfigDir(t)
+			t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+			cmd := createTestCommand()
+			whoamiCmd := newWhoamiCmd()
+			whoamiCmd.SetArgs([]string{})
+
+			// This should handle the no config case gracefully
+			err := runWhoami(cmd, []string{})
+			if err != nil {
+				t.Errorf("runWhoami() should not error for no config, got: %v", err)
+			}
+		})
+
+		t.Run("basic auth config", func(t *testing.T) {
+			// Setup isolated config environment
+			alcoveDir := setupConfigDir(t)
+			t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+			// Write config with basic auth
+			configYAML := `server: https://test.example.com
+	username: testuser
+	password: testpass
+	active_team: Test Team
+	`
+			if err := os.WriteFile(filepath.Join(alcoveDir, "config.yaml"), []byte(configYAML), 0600); err != nil {
+				t.Fatalf("writing config file: %v", err)
+			}
+
+			cmd := createTestCommand()
+
+			// Run whoami - should not error even if server is unreachable
+			err := runWhoami(cmd, []string{})
+			if err != nil {
+				t.Errorf("runWhoami() should not error, got: %v", err)
+			}
+		})
+
+		t.Run("bearer token config", func(t *testing.T) {
+			// Setup isolated config environment
+			alcoveDir := setupConfigDir(t)
+			t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+			// Write config without username/password
+			configYAML := `server: https://token-test.example.com
+	active_team: Token Team
+	`
+			if err := os.WriteFile(filepath.Join(alcoveDir, "config.yaml"), []byte(configYAML), 0600); err != nil {
+				t.Fatalf("writing config file: %v", err)
+			}
+
+			// Write credentials file
+			if err := os.WriteFile(filepath.Join(alcoveDir, "credentials"), []byte("test-token-123"), 0600); err != nil {
+				t.Fatalf("writing credentials file: %v", err)
+			}
+
+			cmd := createTestCommand()
+
+			// Run whoami - should not error even if server is unreachable
+			err := runWhoami(cmd, []string{})
+			if err != nil {
+				t.Errorf("runWhoami() should not error, got: %v", err)
+			}
+		})
+
+		t.Run("json output", func(t *testing.T) {
+			// Setup isolated config environment
+			alcoveDir := setupConfigDir(t)
+			t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+			// Write basic config
+			configYAML := `server: https://json-test.example.com
+	username: jsonuser
+	`
+			if err := os.WriteFile(filepath.Join(alcoveDir, "config.yaml"), []byte(configYAML), 0600); err != nil {
+				t.Fatalf("writing config file: %v", err)
+			}
+
+			cmd := createTestCommand()
+			cmd.ParseFlags([]string{"--output", "json"})
+
+			// Run whoami with JSON output - should not error
+			err := runWhoami(cmd, []string{})
+			if err != nil {
+				t.Errorf("runWhoami() with JSON output should not error, got: %v", err)
+			}
+		})
+
+		t.Run("named profile", func(t *testing.T) {
+			// Setup isolated config environment
+			alcoveDir := setupConfigDir(t)
+			t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+			// Write config with named profiles
+			configYAML := `active_profile: production
+	profiles:
+	  production:
+	    server: https://prod.example.com
+	    username: produser
+	    active_team: Production Team
+	  staging:
+	    server: https://staging.example.com
+	    username: staginguser
+	`
+			if err := os.WriteFile(filepath.Join(alcoveDir, "config.yaml"), []byte(configYAML), 0600); err != nil {
+				t.Fatalf("writing config file: %v", err)
+			}
+
+			cmd := createTestCommand()
+
+			// Run whoami - should use the active profile
+			err := runWhoami(cmd, []string{})
+			if err != nil {
+				t.Errorf("runWhoami() with named profile should not error, got: %v", err)
 			}
 		})
 	}
-}

@@ -913,6 +913,58 @@ alcove version --output json
 
 ---
 
+## alcove whoami
+
+Show current user identity and configuration context.
+
+```
+alcove whoami
+```
+
+### Flags
+
+No command-specific flags. Supports global `--output json`.
+
+### Description
+
+Displays the current user identity, server, profile, team, and authentication method. This is primarily a local operation that shows configured values from the config file, with a single API call to `/api/v1/auth/me` to confirm the authenticated identity.
+
+When the server is unreachable, the command shows local configuration and marks the user as "server unreachable" — this makes it useful for debugging connectivity issues.
+
+When no configuration exists, shows a helpful message directing users to run `alcove login`.
+
+### Output Fields
+
+- **User**: The authenticated username (from server response) or local username for Basic Auth
+- **Server**: The configured Bridge server URL  
+- **Profile**: The active profile name (`<default>` for top-level config)
+- **Team**: The active team name (`<none>` if not set)
+- **Auth**: The authentication method (`Basic Auth`, `Bearer Token`, or `<none>`)
+
+Admin users will have `(admin)` shown next to their username.
+
+### Examples
+
+```bash
+# Show identity and context
+alcove whoami
+
+# JSON output for scripting
+alcove whoami --output json
+```
+
+### Example Output
+
+```
+User:     alice@example.com (admin)
+Server:   https://alcove.example.com
+Profile:  production
+Team:     Hosted Pulp
+Auth:     Basic Auth
+```
+
+---
+
 ## alcove teams
 
 Manage teams. Every resource in Alcove belongs to a team. Users can belong to
