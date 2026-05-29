@@ -1,6 +1,6 @@
 # Getting Started with Alcove
 
-> **Looking to use Alcove against an existing instance rather than self-host?** See the [Adopter Guide](adopter-guide.md).
+> **Looking to use Alcove against an existing instance rather than self-host?** See the [Adopter Guide](adopter-guide.md) for step-by-step instructions on connecting to a running Alcove instance and creating your first agents.
 
 Run Alcove on your laptop in 5 minutes. Everything runs in containers via podman.
 

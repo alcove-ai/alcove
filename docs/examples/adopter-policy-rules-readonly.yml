@@ -1,33 +1,98 @@
-name: readonly-github
-description: Safe read-only access to GitHub API for code analysis
-enforcement_mode: enforce  # Use 'monitor' for testing
+# Read-only GitHub access policy for new adopters
+# This is a safe starting configuration that prevents agents from
+# making any changes to your repository while they learn.
 
 rule_sets:
-  # Allow basic repository information
-  - github-read-issues
-  - github-read-prs
-  - github-read-contents
-  - github-read-commits
-  - github-read-branches
-  - github-read-git
-  - github-read-actions
-  - github-read-releases
+  - name: github-readonly
+    enforcement_mode: enforce
+    rules:
+      # Allow reading repository information
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/*"
 
-# Explicitly deny write operations for safety
-denied_operations:
-  - github-create-issue
-  - github-create-comment
-  - github-create-pr
-  - github-update-pr
-  - github-merge-pr
-  - github-write-contents
-  - github-write-git
-  - github-create-branch
-  - github-delete-branch
-  - github-write-releases
+      # Allow reading file contents
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/contents/**"
 
-# Additional security settings
-max_request_size: 1048576  # 1MB limit
-rate_limit:
-  requests_per_minute: 60
-  burst_size: 10
+      # Allow reading repository metadata
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/branches/**"
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/commits/**"
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/trees/**"
+
+      # Allow reading user information
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/user"
+
+      # Allow reading issues and PRs (but not modifying them)
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/issues/**"
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/pulls/**"
+
+      # Block ALL write operations for safety
+      - deny:
+          method: POST
+          host: api.github.com
+          path: "/**"
+      - deny:
+          method: PUT
+          host: api.github.com
+          path: "/**"
+      - deny:
+          method: PATCH
+          host: api.github.com
+          path: "/**"
+      - deny:
+          method: DELETE
+          host: api.github.com
+          path: "/**"
+
+  # Optional: Basic cost controls for LLM usage
+  - name: basic-cost-control
+    enforcement_mode: enforce
+    rules:
+      # Allow standard Sonnet model
+      - allow:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.model"
+              equals: "claude-sonnet-4-20250514"
+
+      # Block expensive Opus model while learning
+      - deny:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.model"
+              contains: "opus"
+
+      # Reasonable token limit for learning sessions
+      - deny:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.max_tokens"
+              greater_than: 4096

@@ -1,1529 +1,1621 @@
-# Alcove Adopter Guide
+# Adopter Guide: Using Alcove to Automate Your Development
+
+This guide walks you through using Alcove to develop your own application against an existing Alcove instance. You'll learn to connect your CLI, create agent definitions, run sessions, and set up automated workflows for your project.
 
 ## Who This Guide Is For
 
-This guide is for **users connecting to an existing Alcove instance** to automate development on their own projects. If you need to self-host Alcove, see the [Getting Started Guide](getting-started.md) instead. If you want to contribute code to Alcove itself, see the [Development Guide](development-guide.md).
+**You are an adopter** if you:
+- Have access to an existing Alcove Bridge instance (URL + account)
+- Want to use Alcove to automate development tasks on your own project
+- Are looking to integrate AI-powered coding agents into your workflow
 
-After completing this guide, you'll know how to:
-
-- Connect the CLI to your Alcove instance
-- Create and run your first AI coding agent
-- Set up policy rules for secure automation
-- Build workflows that automatically implement features, review code, and merge changes
-- Schedule agents to run on a cron schedule
-- Monitor costs and session activity
+**This guide is NOT for you** if you:
+- Want to self-host Alcove (see [Getting Started](getting-started.md))
+- Want to contribute to Alcove itself (see [Development Guide](development-guide.md))
+- Are looking for complete CLI command reference (see [CLI Reference](cli-reference.md))
 
 ## What You Configure Where
 
-Alcove splits configuration between YAML files (single source of truth) and CLI/dashboard (runtime data):
+| Resource | Where to Configure | Tool Used |
+|----------|-------------------|-----------|
+| Agent definitions | `.alcove/agents/*.yml` | YAML files in your repo |
+| Workflows | `.alcove/workflows/*.yml` | YAML files in your repo |
+| Policy rules | `.alcove/policy-rules/*.yml` | YAML files in your repo |
+| Credentials (API keys) | Bridge database | `alcove credentials` CLI |
+| Teams and members | Bridge database | `alcove teams` CLI |
+| Session monitoring | Read-only | Dashboard + `alcove logs` CLI |
 
-| What | Where | Why |
-|------|-------|-----|
-| **Agent definitions** | `.alcove/agents/*.yml` in your repo | Version-controlled with your project |
-| **Workflows** | `.alcove/workflows/*.yml` in your repo | Part of your development process |
-| **Policy rules** | `.alcove/policy-rules/*.yml` in your repo | Security is part of your codebase |
-| **Credentials** | CLI (`alcove credentials create`) | Sensitive data, not in git |
-| **Teams** | CLI (`alcove teams create`) | User management |
-| **Catalog** | Dashboard (read-only) | Browse available agents/tools |
+**Key insight:** Agent definitions, workflows, and security policies live in YAML files in your repository. The API and dashboard are for credentials, teams, and monitoring—not for creating agents.
 
 ## Prerequisites
 
-Before starting, ensure you have:
+Before you begin, ensure you have:
+- **Bridge URL** — the URL of your Alcove instance (e.g., `https://alcove.company.com`)
+- **Account** — username/password or API token for the Bridge instance
+- **Project repository** — a Git repo where you want to add Alcove automation
+- **API credentials** — tokens for GitHub/GitLab and an LLM provider (Anthropic or Google Vertex)
 
-1. **Access to an Alcove instance** — Bridge URL and user account
-2. **CLI binary** — download from the [CLI Installation Guide](cli-installation.md)
-3. **Personal API token** (recommended) — from the dashboard user settings
-4. **GitHub or GitLab repository** — where you'll add `.alcove/` directory
-
-You do **not** need podman, Go, or build tools — just the CLI binary and Bridge access.
+**What you DON'T need:**
+- podman or Docker (sessions run on the Bridge instance, not locally)
+- Go compiler (agents run in sandboxed containers)
+- Kubernetes cluster (provided by the Bridge instance)
 
 ## Install the CLI
 
-### Quick Installation
+Follow the [CLI Installation Guide](cli-installation.md) to install the `alcove` binary.
 
-**Linux/macOS:**
+Quick install:
 ```bash
+# Linux/macOS
 curl -fsSL https://raw.githubusercontent.com/alcove-ai/alcove/main/scripts/install.sh | bash
-```
 
-**Windows (PowerShell):**
-```powershell
+# Windows PowerShell
 iex (iwr -useb 'https://raw.githubusercontent.com/alcove-ai/alcove/main/scripts/install.ps1').Content
-```
 
-### Verify Installation
-
-```bash
+# Verify installation
 alcove version
-alcove --help
 ```
-
-For detailed installation options including manual downloads and custom directories, see the [CLI Installation Guide](cli-installation.md).
 
 ## Connect to Your Alcove Instance
 
-### Basic Login
-
-Connect to your Alcove instance using your credentials:
+### Login with Username/Password
 
 ```bash
-alcove login --server https://<your-bridge-url> --username <your-username>
+alcove login https://your-bridge-instance.com
+# Enter username and password when prompted
 ```
 
-For production use, personal API tokens are more secure than passwords:
+### Login with API Token (Recommended)
+
+Personal API tokens (starting with `apat_`) are more secure than passwords:
 
 ```bash
-alcove login --server https://<your-bridge-url> --token <your-personal-api-token>
+# Create token in dashboard: Profile → API Tokens → Create
+alcove login https://your-bridge-instance.com --token apat_your_token_here
 ```
 
-Generate personal API tokens in the dashboard under **User Settings** → **API Tokens**. They have the `apat_` prefix.
-
-### Multiple Environments
-
-You can configure multiple environment profiles:
-
-```bash
-# Production environment
-alcove login --server https://alcove-prod.company.com --username <user> --profile prod
-
-# Staging environment  
-alcove login --server https://alcove-staging.company.com --username <user> --profile staging
-
-# Switch between environments
-alcove config set-profile prod
-alcove config set-profile staging
-```
-
-### Validate Connection
-
-Test your connection and view server information:
+### Verify Connection
 
 ```bash
 alcove config validate
-alcove version  # Shows both client and server versions
+# Should show: ✓ Configuration is valid
+# Should show: ✓ Connected to Bridge at https://...
+
+alcove version
+# Shows both client and server versions
 ```
 
-### Corporate Networks
+### Multiple Environments
 
-If you're behind a corporate proxy, configure proxy settings:
+You can manage multiple Alcove instances with profiles:
 
 ```bash
-# Set environment variables
-export HTTP_PROXY=http://proxy.company.com:8080
-export HTTPS_PROXY=http://proxy.company.com:8080
+# Login to staging
+alcove login https://staging.company.com --profile staging
 
-# Or use CLI flag
-alcove --proxy-url http://proxy.company.com:8080 config validate
+# Login to production  
+alcove login https://alcove.company.com --profile prod
+
+# Switch between environments
+alcove config set-profile staging
+alcove config set-profile prod
+
+# Use a specific profile for one command
+alcove list --profile staging
 ```
+
+**Troubleshooting:**
+- **Certificate errors**: Use `--insecure` flag for self-signed certificates
+- **Corporate proxies**: Set `HTTP_PROXY`/`HTTPS_PROXY` environment variables or use `--proxy-url`
+- **Permission denied**: Check your username/password or API token
 
 ## Explore the Dashboard
 
-Before creating agents, familiarize yourself with the dashboard (web interface at your Bridge URL):
+Before creating agents, familiarize yourself with the dashboard. Open your Bridge URL in a browser and log in.
 
-- **Teams** — view your team memberships and switch team context
-- **Sessions** — list running and completed agent sessions
-- **Catalog** — browse available agents, tools, and LSP servers
-- **Workflows** — view workflow definitions and runs
-- **Credentials** — manage LLM providers and service credentials
+### Key Dashboard Sections
 
-**Important:** The dashboard is read-only for agent definitions, workflows, and policy rules. These must be created as YAML files in your repository.
+**Teams** — Every resource belongs to a team. You'll see:
+- Teams you belong to
+- Members in each team
+- Team-specific resources (agents, credentials, workflows)
+
+**Catalog** — Available tools and agents:
+- Official starter agents (code reviewer, issue implementer, etc.)
+- Custom agents synced from your repos
+- Tools and extensions your team has enabled
+
+**Sessions** — Running and completed sessions:
+- Real-time status of active agents
+- Session transcripts and outputs
+- Resource usage and costs
+
+**Workflows** — Automated pipelines:
+- Workflow definitions from your repos
+- Running workflow instances
+- Execution history and logs
+
+**Note:** The dashboard is read-only for agent definitions. You create agents by adding YAML files to your repository, not through the web interface.
 
 ## Set Up Your Team
 
-Teams are the ownership unit in Alcove. Every resource belongs to a team.
+If you're just getting started, you'll need to set up your team context.
 
-### Create a Team
+### List Available Teams
 
 ```bash
-alcove teams create --name "My Development Team" --description "Team for automating our Go web service"
+alcove teams list
+# Shows teams you're a member of
 ```
 
-### Switch Team Context
+### Create a Team (if needed)
 
-All subsequent commands will target this team:
+```bash
+alcove teams create "My Development Team"
+```
+
+### Set Team Context
+
+All subsequent commands will operate in this team's scope:
 
 ```bash
 alcove teams switch "My Development Team"
+
+# Or use --team flag for individual commands
+alcove list --team "My Development Team"
 ```
 
 ### Invite Team Members
 
 ```bash
-alcove teams invite --email colleague@company.com --team "My Development Team"
-```
-
-### List Teams
-
-```bash
-alcove teams list
+alcove teams invite "My Development Team" colleague@company.com
 ```
 
 ## Register Credentials
 
-Agents need credentials to access external services. Register them via CLI:
+Agents need API credentials to interact with external services. Store these securely via the CLI—never put real tokens in YAML files.
 
-### LLM Provider
+### LLM Provider Credentials
 
-**For Anthropic Claude:**
+**For Anthropic API:**
 ```bash
-alcove credentials create llm anthropic \
-  --name "Primary Claude API" \
-  --key "ANTHROPIC_API_KEY" \
-  --value "<your-claude-api-key>"
+alcove credentials create anthropic \
+  --key api-key \
+  --value sk-ant-your-anthropic-key-here \
+  --description "Anthropic API for agents"
 ```
 
 **For Google Vertex AI:**
 ```bash
-alcove credentials create llm google-vertex \
-  --name "Production Vertex AI" \
-  --key "GOOGLE_APPLICATION_CREDENTIALS" \
-  --value '<your-service-account-json>' \
-  --metadata project_id=your-gcp-project \
-  --metadata region=us-east5
+# Save service account JSON to a file first
+alcove credentials create google-vertex \
+  --key service-account-json \
+  --file /path/to/service-account.json \
+  --description "Google Cloud service account for Vertex AI"
+
+# Also store project ID and region
+alcove credentials create google-vertex-project \
+  --key project-id \
+  --value your-gcp-project-id
+
+alcove credentials create google-vertex-region \
+  --key region \
+  --value us-east5
 ```
 
-### Source Control
+### Source Code Management
 
 **For GitHub:**
 ```bash
-alcove credentials create scm github \
-  --name "GitHub PAT" \
-  --key "GITHUB_TOKEN" \
-  --value "<your-github-personal-access-token>"
+alcove credentials create github \
+  --key pat \
+  --value ghp_your_github_token_here \
+  --description "GitHub PAT with repo access"
 ```
 
 **For GitLab:**
 ```bash
-alcove credentials create scm gitlab \
-  --name "GitLab PAT" \
-  --key "GITLAB_TOKEN" \
-  --value "<your-gitlab-personal-access-token>"
+alcove credentials create gitlab \
+  --key pat \
+  --value glpat-your-gitlab-token-here \
+  --description "GitLab PAT with api scope"
 ```
 
-### List Credentials
+### Verify Credentials
 
 ```bash
 alcove credentials list
+# Shows stored credentials (values are hidden)
 ```
 
-**Security Note:** Credentials are encrypted at rest and never exposed to agents directly. Gate (the auth proxy) injects them into requests at runtime.
+**Security note:** Credentials are encrypted in the Bridge database and never appear in agent transcripts. Agents receive only temporary tokens through the Gate proxy.
 
 ## Create Your First Agent Definition
 
-Let's create a simple agent that analyzes your codebase and suggests improvements. In your project repository:
+Let's create a simple agent that can analyze your codebase. Agents are defined in `.alcove/agents/*.yml` files in your repository.
 
 ### Step 1: Create Directory Structure
 
+In your project repository:
 ```bash
 mkdir -p .alcove/agents
 ```
 
-### Step 2: Create Basic Agent
+### Step 2: Create a Minimal Agent
 
 Create `.alcove/agents/hello.yml`:
 
 ```yaml
-name: Hello World Agent
-description: A simple agent that explores the codebase and suggests improvements
+name: Code Analyzer
 prompt: |
-  You are a code analysis agent. Please:
+  You are a code analyzer. Examine the codebase and provide:
   
-  1. Examine the repository structure and identify the main programming language
-  2. Look for common code quality issues (unused imports, TODO comments, etc.)
-  3. Suggest 3 concrete improvements with file paths and line numbers
-  4. Create a summary report in ANALYSIS.md
+  1. A summary of what this project does
+  2. The main programming language and frameworks used
+  3. Potential areas for improvement
+  4. Any obvious bugs or security issues
+  
+  Focus on actionable insights that would help a developer understand and improve this code.
 
 repos:
   - name: main
-    url: https://github.com/<your-org>/<your-repo>.git
+    url: <your-org>/<your-repo>
     ref: main
 
-timeout: 900  # 15 minutes
-budget_usd: 2.00  # Cost limit
-model: claude-sonnet-4-20250514
-provider: anthropic
+timeout: 600
+budget_usd: 5.0
 ```
 
-Replace `<your-org>/<your-repo>` with your actual repository.
+### Step 3: Add Progressive Configuration
 
-### Step 3: Progressive Enhancement
-
-After testing the basic agent, enhance it with additional features:
+Enhance your agent with provider and model settings:
 
 ```yaml
-name: Advanced Code Analyzer
-description: Comprehensive code analysis with security and performance checks
+name: Code Analyzer
+description: Analyzes code quality and suggests improvements
 prompt: |
-  You are a senior code analysis agent. Please:
+  You are a code analyzer. Examine the codebase and provide:
   
-  1. Analyze code quality and suggest improvements
-  2. Check for security vulnerabilities (SQL injection, XSS, etc.)
-  3. Identify performance bottlenecks
-  4. Suggest refactoring opportunities
-  5. Create a detailed report in ANALYSIS.md with:
-     - Executive summary
-     - Detailed findings by category
-     - Prioritized recommendations
+  1. A summary of what this project does
+  2. The main programming language and frameworks used
+  3. Potential areas for improvement
+  4. Any obvious bugs or security issues
+  
+  Focus on actionable insights that would help a developer understand and improve this code.
 
 repos:
   - name: main
-    url: https://github.com/<your-org>/<your-repo>.git
+    url: <your-org>/<your-repo>
     ref: main
 
-timeout: 1800  # 30 minutes
-budget_usd: 5.00
+# Cost and time controls
+timeout: 600          # 10 minutes max
+budget_usd: 5.0      # $5 spending limit
+
+# LLM configuration
+provider: anthropic   # or "google-vertex"
 model: claude-sonnet-4-20250514
-provider: anthropic
-
-# Optional: Schedule to run weekly
-schedule:
-  cron: "0 9 * * 1"  # Mondays at 9 AM
-  enabled: false  # Enable after testing
-
-# Optional: Use a custom development environment
-dev_container:
-  image: golang:1.25-bookworm
-  network_access: internal  # or 'external' if needed
+credentials:
+  ANTHROPIC_API_KEY: anthropic  # references credential named "anthropic"
 ```
+
+**For Vertex AI, use:**
+```yaml
+provider: google-vertex
+model: claude-sonnet-4-20250514
+credentials:
+  GOOGLE_VERTEX_SA_JSON: google-vertex
+  GOOGLE_VERTEX_PROJECT: google-vertex-project
+  GOOGLE_VERTEX_REGION: google-vertex-region
+```
+
+### Step 4: Commit and Push
+
+```bash
+git add .alcove/
+git commit -m "Add Alcove code analyzer agent"
+git push
+```
+
+**Placeholder reminder:** Replace `<your-org>/<your-repo>` with your actual repository URL throughout this guide.
 
 ## Register Your Agent Repository
 
-After creating agent definitions, register the repository with Alcove:
+Tell Alcove to monitor your repository for agent definitions:
+
+### Add Repository
 
 ```bash
-# Add repository
-alcove agents repos add https://github.com/<your-org>/<your-repo>.git
+alcove agents repos add https://github.com/<your-org>/<your-repo>
+```
 
-# Trigger sync to pull latest agent definitions
+### Trigger Sync
+
+Force an immediate sync to pick up your new agent:
+
+```bash
 alcove agents sync
-
-# Verify agents are loaded
-alcove agents list
 ```
 
-### Troubleshooting Repository Sync
-
-If your agents don't appear:
+### Verify Agent Registration
 
 ```bash
-# Check sync status
-alcove agents repos status
+alcove agents list
+# Should show your "Code Analyzer" agent
 
-# View sync logs
-alcove agents sync --verbose
-
-# Common issues:
-# - Repository URL incorrect
-# - No .alcove/agents/*.yml files
-# - YAML syntax errors
-# - Team doesn't have repo access
+# Get detailed agent info
+alcove agents describe "Code Analyzer"
 ```
+
+**Troubleshooting:**
+- **Agent not appearing**: Check that your YAML file is valid and in `.alcove/agents/`
+- **Sync failed**: Verify repository permissions and that the repo is accessible
+- **YAML errors**: Use `alcove agents validate` to check syntax locally
 
 ## Run Your Agent
+
+Now let's run your first agent and see it in action:
 
 ### Start a Session
 
 ```bash
-# Run specific agent
-alcove agents run hello-world-agent
-
-# Run with custom inputs (for parameterized agents)
-alcove agents run hello-world-agent --input branch=feature-123
-
-# Monitor session in real-time
-alcove run --agent hello-world-agent --watch
+alcove agents run "Code Analyzer"
+# Returns a session ID like: ses_abc123
 ```
 
-### Monitor Running Sessions
+### Watch Progress in Real-time
 
 ```bash
-# List all sessions
-alcove list
-
-# List only running sessions
-alcove list --status running
-
-# Get detailed session info
-alcove status <session-id>
+alcove run --watch --agent "Code Analyzer"
+# Shows live updates as the agent works
 ```
 
-### Session States
+### Check Session Status
 
-- **queued** — waiting for available resources
-- **initializing** — setting up containers and cloning repos
-- **running** — agent is actively working
-- **completed** — finished successfully
-- **failed** — encountered an error
-- **cancelled** — manually stopped
-- **timeout** — exceeded time limit
-- **budget_exceeded** — exceeded cost limit
+```bash
+alcove status ses_abc123
+# Shows current state: pending, running, completed, failed
+```
+
+### Alternative: Quick Ad-hoc Run
+
+For simple tasks, you can run agents without predefined definitions:
+
+```bash
+alcove run "Review the README file and suggest improvements" \
+  --repo <your-org>/<your-repo> \
+  --timeout 300 \
+  --budget 2.0
+```
 
 ## Read Session Output
 
-### View Session Transcript
+Once your session completes, examine the results:
+
+### View the Main Transcript
 
 ```bash
-# Full session transcript (agent's reasoning and actions)
-alcove logs <session-id>
-
-# Stream logs in real-time for running sessions
-alcove logs <session-id> --follow
-
-# View only the final summary
-alcove logs <session-id> --summary
+alcove logs ses_abc123
+# Shows the complete agent conversation and actions
 ```
 
-### View Proxy Logs
+### View Proxy Activity
 
-Gate (the auth proxy) logs all external API calls:
+See what external APIs your agent accessed:
 
 ```bash
-# See what external services the agent accessed
-alcove logs <session-id> --proxy
-
-# Filter proxy logs
-alcove logs <session-id> --proxy --filter github.com
+alcove logs ses_abc123 --proxy
+# Shows GitHub API calls, LLM requests, etc.
 ```
 
-### Download Session Artifacts
+### Export Session Data
 
-Some agents produce files (reports, code changes, etc.):
+For deeper analysis or sharing:
 
 ```bash
-# List session outputs
-alcove outputs <session-id>
-
-# Download specific file
-alcove outputs <session-id> --file ANALYSIS.md --download ./analysis-report.md
+alcove export ses_abc123
+# Creates a JSON file with complete session data
 ```
+
+### Monitor Multiple Sessions
+
+```bash
+alcove list --since 1h          # Last hour
+alcove list --status running    # Only active sessions
+alcove list --agent "Code Analyzer"  # Specific agent
+```
+
+**Understanding output:**
+- **Main transcript**: Shows the agent's reasoning and file changes
+- **Proxy logs**: Shows external API calls (usually successful, denied calls are flagged)
+- **Exit code**: 0 = success, non-zero = error or cancellation
 
 ## Add Policy Rules
 
-Policy rules control what external APIs your agents can access. This is critical for security in production environments.
+By default, agents have broad access. Use policy rules to control what agents can do for security and cost control.
 
-### Step 1: Create Policy Rules Directory
+### Create Policy Rules Directory
 
 ```bash
 mkdir -p .alcove/policy-rules
 ```
 
-### Step 2: Create Read-Only GitHub Profile
+### Read-Only GitHub Access
 
-Start with restrictive permissions and expand as needed. Create `.alcove/policy-rules/readonly-github.yml`:
+Create `.alcove/policy-rules/readonly-github.yml`:
 
 ```yaml
-name: read-only-github
-description: Safe read-only access to GitHub API for code analysis
-enforcement_mode: enforce  # Use 'monitor' for testing
-
 rule_sets:
-  # Allow basic repository information
-  - github-read-issues
-  - github-read-prs
-  - github-read-contents
-  - github-read-commits
-  - github-read-branches
-  - github-read-git
-
-# Deny all write operations
-denied_operations:
-  - github-create-issue
-  - github-create-comment
-  - github-create-pr
-  - github-merge-pr
-  - github-write-contents
-  - github-write-git
+  - name: github-readonly
+    enforcement_mode: enforce  # or "monitor" to log violations without blocking
+    rules:
+      # Allow repository information
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/repos/*/*"
+      - allow:
+          method: GET  
+          host: api.github.com
+          path: "/repos/*/contents/**"
+      
+      # Allow user information
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/user"
+      
+      # Block all write operations
+      - deny:
+          method: POST
+          host: api.github.com
+          path: "/**"
+      - deny:
+          method: PUT
+          host: api.github.com
+          path: "/**"
+      - deny:
+          method: PATCH
+          host: api.github.com
+          path: "/**"
+      - deny:
+          method: DELETE
+          host: api.github.com
+          path: "/**"
 ```
 
-### Step 3: Update Agent to Use Profile
+### Update Agent to Use Policy Rules
 
-Add the profile to your agent definition:
+Add the `profiles` field to your agent definition:
 
 ```yaml
-name: Safe Code Analyzer
-# ... other fields ...
+name: Code Analyzer
+description: Analyzes code quality and suggests improvements
+prompt: |
+  You are a code analyzer. Examine the codebase and provide insights.
 
+repos:
+  - name: main
+    url: <your-org>/<your-repo>
+    ref: main
+
+# Security policy
 profiles:
   - readonly-github
+
+timeout: 600
+budget_usd: 5.0
+provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
 ```
 
-### Step 4: Test Enforcement
+### Common Policy Scenarios
+
+**Read-write GitHub with PR creation:**
+```yaml
+rule_sets:
+  - name: github-pr-creation
+    enforcement_mode: enforce
+    rules:
+      # All read operations
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/**"
+      
+      # PR and branch management
+      - allow:
+          method: POST
+          host: api.github.com
+          path: "/repos/*/pulls"
+      - allow:
+          method: PATCH
+          host: api.github.com
+          path: "/repos/*/pulls/*"
+      
+      # Git references (branches, tags)
+      - allow:
+          method: POST
+          host: api.github.com
+          path: "/repos/*/git/refs"
+      
+      # Block dangerous operations
+      - deny:
+          method: DELETE
+          host: api.github.com
+          path: "/repos/*"
+      - deny:
+          method: PATCH
+          host: api.github.com
+          path: "/repos/*/settings"
+```
+
+**Budget and LLM controls:**
+```yaml
+rule_sets:
+  - name: cost-control
+    enforcement_mode: enforce
+    rules:
+      # Limit to specific LLM models
+      - allow:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.model"
+              equals: "claude-sonnet-4-20250514"
+      
+      # Block expensive models
+      - deny:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.model"
+              contains: "opus"
+```
+
+### Commit Policy Rules
 
 ```bash
-# Sync policy rules
+git add .alcove/policy-rules/
+git commit -m "Add read-only GitHub policy rules"
+git push
+
+# Re-sync to pick up new policies
 alcove agents sync
-
-# Run agent with new profile
-alcove agents run safe-code-analyzer
-
-# Check proxy logs for denied requests
-alcove logs <session-id> --proxy | grep -i denied
 ```
-
-### Common Policy Profiles
-
-**Read-Write GitHub (for agents that create PRs):**
-
-```yaml
-name: github-contributor
-description: Can read repos and create PRs but not merge
-enforcement_mode: enforce
-
-rule_sets:
-  # Read permissions
-  - github-read-issues
-  - github-read-prs
-  - github-read-contents
-  - github-read-commits
-  - github-read-branches
-  - github-read-git
-  
-  # Write permissions for PRs
-  - github-create-pr
-  - github-update-pr
-  - github-create-comment
-  - github-create-branch
-  - github-write-contents
-  - github-write-git
-
-denied_operations:
-  - github-merge-pr  # Prevent auto-merge
-  - github-delete-branch  # Prevent cleanup
-```
-
-**Full GitHub Access (for automation pipelines):**
-
-```yaml
-name: github-automation
-description: Full GitHub API access for SDLC automation
-enforcement_mode: enforce
-
-rule_sets:
-  # Include all GitHub rule sets
-  - github-read-issues
-  - github-read-prs
-  - github-read-contents
-  - github-read-commits
-  - github-read-branches
-  - github-read-git
-  - github-create-comment
-  - github-create-issue
-  - github-update-issue
-  - github-create-pr
-  - github-update-pr
-  - github-merge-pr
-  - github-create-review
-  - github-write-contents
-  - github-write-git
-  - github-create-branch
-  - github-delete-branch
-```
-
-For complete rule sets, see the existing policy rules:
-- [GitHub Rules](../.alcove/policy-rules/github.yml)
-- [GitLab Rules](../.alcove/policy-rules/gitlab.yml)
-
-### Enforcement Modes
-
-- **`enforce`** — Block unauthorized requests (production)
-- **`monitor`** — Log violations but allow requests (testing)
-
-Start with `monitor` mode when developing new agents, then switch to `enforce` for production use.
 
 ## Set Up a Workflow
 
-Workflows chain multiple agents and bridge actions into automated pipelines. Let's create a simple feature implementation workflow.
+Individual agents are useful, but workflows let you chain multiple agents and bridge actions into automated pipelines.
 
-### Step 1: Create Workflow Directory
+### Create Workflow Directory
 
 ```bash
 mkdir -p .alcove/workflows
 ```
 
-### Step 2: Basic Two-Step Workflow
+### Minimal 2-Step Workflow
 
-Create `.alcove/workflows/basic-feature.yml`:
+Create `.alcove/workflows/code-review.yml`:
 
 ```yaml
-name: Basic Feature Implementation
-description: Implement a feature and create a PR
-
-trigger:
-  github_issue_labeled:
-    repo: <your-org>/<your-repo>
-    label: ready-for-dev
+name: Code Review Workflow
 
 workflow:
-  # Step 1: Agent implements the feature
-  - id: implement
+  # Step 1: Analyze the code
+  - id: analyze
     type: agent
-    agent: developer-agent
-    inputs:
-      issue_number: "{{trigger.issue_number}}"
-      branch: "feature-{{trigger.issue_number}}"
-    outputs: [summary, changes_made]
-
-  # Step 2: Bridge creates a pull request
-  - id: create-pr
+    agent: Code Analyzer
+    outputs: [summary, issues]
+  
+  # Step 2: Create an issue if problems found
+  - id: create-issue
     type: bridge
-    action: create-pr
-    depends: "implement.Succeeded"
+    action: create-issue
+    depends: "analyze.Succeeded && analyze.issues"
     inputs:
-      repo: <your-org>/<your-repo>
-      branch: "{{steps.implement.inputs.branch}}"
-      title: "Implement #{{trigger.issue_number}}"
+      title: "Code Analysis Results"
       body: |
-        Automated implementation of issue #{{trigger.issue_number}}.
+        ## Analysis Summary
+        {{analyze.summary}}
         
-        ## Changes Made
-        {{steps.implement.outputs.changes_made}}
+        ## Issues Found
+        {{analyze.issues}}
         
-        ## Summary
-        {{steps.implement.outputs.summary}}
-      base: main
+        Created by Alcove Code Review Workflow
 ```
 
-### Step 3: Advanced Review Loop Workflow
+### Advanced: Review Loop Pattern
 
-For production use, add review and revision cycles. Create `.alcove/workflows/sdlc-pipeline.yml`:
+For production workflows, add review and iteration cycles:
 
 ```yaml
-name: Full SDLC Pipeline
-description: Complete feature implementation with review loop
-
-trigger:
-  github_issue_labeled:
-    repo: <your-org>/<your-repo>
-    label: ready-for-dev
+name: Feature Implementation Pipeline
 
 workflow:
-  # Step 1: Claim the issue (remove trigger label, assign bot)
-  - id: claim-issue
-    type: bridge
-    action: update-issue
-    inputs:
-      repo: <your-org>/<your-repo>
-      issue_number: "{{trigger.issue_number}}"
-      assignee: alcove-bot
-      labels:
-        add: [in-progress]
-        remove: [ready-for-dev]
-
-  # Step 2: Agent implements the feature
+  # Step 1: Implement the feature
   - id: implement
     type: agent
-    agent: developer-agent
-    depends: "claim-issue.Succeeded"
+    agent: Feature Developer
     inputs:
       issue_number: "{{trigger.issue_number}}"
       branch: "feature-{{trigger.issue_number}}"
-    outputs: [summary, changes_made]
-
-  # Step 3: Bridge creates PR
+    outputs: [summary, branch]
+  
+  # Step 2: Create pull request
   - id: create-pr
     type: bridge
     action: create-pr
     depends: "implement.Succeeded"
     inputs:
-      repo: <your-org>/<your-repo>
-      branch: "{{steps.implement.inputs.branch}}"
-      title: "Implement #{{trigger.issue_number}}"
-      base: main
-
-  # Step 4: Wait for CI to pass
+      branch: "{{implement.branch}}"
+      title: "Implement feature from issue #{{trigger.issue_number}}"
+      body: "{{implement.summary}}"
+    outputs: [pr_number]
+  
+  # Step 3: Wait for CI to pass
   - id: await-ci
     type: bridge
     action: await-ci
-    depends: "create-pr.Succeeded || ci-fix.Succeeded"
-    max_iterations: 4  # Prevent infinite CI retry loops
+    depends: "create-pr.Succeeded"
     inputs:
-      repo: <your-org>/<your-repo>
-      pr: "{{steps.create-pr.outputs.pr_number}}"
-
-  # Step 5: Fix CI failures if needed
-  - id: ci-fix
-    type: agent
-    agent: developer-agent
-    depends: "await-ci.Failed"
-    max_iterations: 3
-    inputs:
-      branch: "{{steps.implement.inputs.branch}}"
-      ci_logs: "{{steps.await-ci.outputs.failure_logs}}"
-    outputs: [summary]
-
-  # Step 6: Code review (runs after CI passes)
+      pr_number: "{{create-pr.pr_number}}"
+    timeout: 1800  # 30 minutes
+  
+  # Step 4: Code review (parallel with security review)
   - id: code-review
     type: agent
-    agent: reviewer-agent
-    depends: "await-ci.Succeeded || revision.Succeeded"
-    max_iterations: 3
+    agent: PR Reviewer
+    depends: "await-ci.Succeeded"
     inputs:
-      pr: "{{steps.create-pr.outputs.pr_number}}"
+      pr_number: "{{create-pr.pr_number}}"
     outputs: [approved, comments]
-    output_contract:
-      required: [approved, comments]
-      allowed_values:
-        approved: ["true", "false"]
-      routing_field: approved
-      success_value: "true"
-
-  # Step 7: Address review feedback
+  
+  - id: security-review
+    type: agent
+    agent: Security Reviewer  
+    depends: "await-ci.Succeeded"
+    inputs:
+      pr_number: "{{create-pr.pr_number}}"
+    outputs: [approved, findings]
+  
+  # Step 5: Address review feedback (if rejected)
   - id: revision
     type: agent
-    agent: developer-agent
-    depends: "code-review.Failed"
-    max_iterations: 3
+    agent: Feature Developer
+    depends: "(code-review.Succeeded && !code-review.approved) || (security-review.Succeeded && !security-review.approved)"
+    max_iterations: 3  # Limit revision loops
     inputs:
-      branch: "{{steps.implement.inputs.branch}}"
-      feedback: "{{steps.code-review.outputs.comments}}"
-    outputs: [summary]
-
-  # Step 8: Merge the PR
+      pr_number: "{{create-pr.pr_number}}"
+      code_feedback: "{{code-review.comments}}"
+      security_feedback: "{{security-review.findings}}"
+    outputs: [revised]
+  
+  # Step 6: Merge when both reviews pass
   - id: merge
     type: bridge
     action: merge-pr
-    depends: "code-review.Succeeded"
+    depends: "code-review.approved && security-review.approved"
     inputs:
-      repo: <your-org>/<your-repo>
-      pr: "{{steps.create-pr.outputs.pr_number}}"
-      merge_method: squash
+      pr_number: "{{create-pr.pr_number}}"
 ```
 
-### Step 4: Bridge Actions Reference
+### Workflow Triggers
 
-Common bridge actions:
-
-- **`create-pr`** — Create pull/merge request
-- **`update-pr`** — Update PR title, body, or labels
-- **`merge-pr`** — Merge an approved PR
-- **`await-ci`** — Wait for CI checks to pass
-- **`update-issue`** — Add/remove labels, assign users
-- **`create-issue`** — Create new issue
-
-For complete action reference, see [Workflow Authoring Guide](workflow-authoring.md).
-
-### Step 5: Depends Expressions
-
-Control workflow flow with `depends` expressions:
+You can trigger workflows manually or on schedule:
 
 ```yaml
-# Simple dependency
-depends: "implement.Succeeded"
+name: Daily Code Quality Check
 
-# Multiple conditions with AND
-depends: "code-review.Succeeded && security-review.Succeeded"
+# Trigger every weekday at 9 AM
+trigger:
+  schedule:
+    cron: "0 9 * * 1-5"
 
-# Multiple conditions with OR (retry scenarios)
-depends: "create-pr.Succeeded || ci-fix.Succeeded"
-
-# Complex boolean logic
-depends: "(review-1.Succeeded || review-2.Succeeded) && await-ci.Succeeded"
+workflow:
+  - id: quality-check
+    type: agent
+    agent: Code Analyzer
+    outputs: [quality_score, recommendations]
+  
+  - id: notify-team
+    type: bridge
+    action: send-notification
+    depends: "quality-check.quality_score < 8.0"
+    inputs:
+      message: "Code quality score: {{quality-check.quality_score}}. Review needed."
 ```
 
-For advanced workflow patterns, see [Workflow Authoring Guide](workflow-authoring.md).
+### Run Workflows
+
+```bash
+# Manual trigger
+alcove workflows run "Code Review Workflow"
+
+# With inputs
+alcove workflows run "Feature Implementation Pipeline" \
+  --input issue_number=123
+
+# Monitor progress
+alcove workflows runs --status running
+alcove workflows run-status <run-id>
+```
 
 ## Schedule Agents
 
-Add cron-based scheduling to any agent definition:
+For regular automation, add scheduling directly to agent definitions:
 
-### Basic Scheduling
+### Add Schedule to Agent
 
 ```yaml
-name: Weekly Security Audit
-# ... agent definition ...
+name: Daily Security Scan
+description: Scans codebase for security vulnerabilities
 
 schedule:
-  cron: "0 9 * * 1"  # Mondays at 9:00 AM
+  cron: "0 2 * * *"  # Daily at 2 AM UTC
   enabled: true
-  timezone: "America/New_York"  # Optional, defaults to UTC
+
+prompt: |
+  Scan the codebase for security vulnerabilities and generate a report.
+  
+  Focus on:
+  - Hardcoded credentials or secrets
+  - SQL injection risks
+  - XSS vulnerabilities
+  - Dependency vulnerabilities
+  
+  Create a summary with severity levels and recommended fixes.
+
+repos:
+  - name: main
+    url: <your-org>/<your-repo>
+    ref: main
+
+timeout: 1800
+budget_usd: 10.0
+provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
+
+profiles:
+  - readonly-github
 ```
 
-### Cron Expression Examples
-
-| Expression | Description |
-|-----------|-------------|
-| `0 9 * * 1` | Mondays at 9:00 AM |
-| `0 0 * * *` | Daily at midnight |
-| `0 */6 * * *` | Every 6 hours |
-| `30 14 * * 5` | Fridays at 2:30 PM |
-| `0 8 1 * *` | First day of each month at 8:00 AM |
-
-### Disable Scheduling
-
-To temporarily disable scheduled runs without removing the schedule:
+### Cron Schedule Format
 
 ```yaml
 schedule:
-  cron: "0 9 * * 1"
-  enabled: false  # Disable scheduling
+  cron: "minute hour day-of-month month day-of-week"
+  enabled: true
 ```
+
+**Examples:**
+- `"0 9 * * 1-5"` — Weekdays at 9 AM
+- `"*/15 * * * *"` — Every 15 minutes
+- `"0 0 1 * *"` — First day of every month at midnight
+- `"0 2 * * 0"` — Sundays at 2 AM
 
 ### Monitor Scheduled Runs
 
 ```bash
-# List upcoming scheduled runs
-alcove schedule list
-
-# View schedule history
-alcove schedule history --agent weekly-security-audit
-
-# Cancel a scheduled run
-alcove schedule cancel <schedule-id>
+alcove list --since 24h --scheduled
+alcove agents status "Daily Security Scan"
 ```
 
 ## Use Dev Containers
 
-Dev containers provide isolated environments with project-specific tooling. They're especially useful for builds, tests, and language-specific analysis.
+For agents that need to build, test, or run your project, use dev containers to provide the right environment.
 
-### Basic Dev Container
+### When to Use Dev Containers
+
+- **Building**: Agents need to compile code, run tests, or use build tools
+- **Language-specific tools**: Project uses specific versions of Node.js, Python, Go, etc.
+- **Dependencies**: Agent needs databases, caches, or other services
+- **Testing**: Running unit tests, integration tests, or linting
+
+### Add Dev Container to Agent
 
 ```yaml
-name: Go Test Runner
+name: Test Runner
+description: Runs project tests and reports results
+
+dev_container:
+  image: node:18-slim  # or your custom image
+  network_access: internal  # or "external" if tests need internet
+
 prompt: |
-  Run the full test suite and analyze any failures:
+  You have access to a development container with Node.js 18 installed.
   
-  1. Run `go test ./...` in the dev container
-  2. If tests fail, analyze the failures and suggest fixes
-  3. Create a test report in TEST_RESULTS.md
+  Your task:
+  1. Install project dependencies with `npm install`
+  2. Run the test suite with `npm test`
+  3. Analyze any failing tests and suggest fixes
+  4. If tests pass, run linting with `npm run lint`
+  
+  Use the /exec command to run shell commands in the dev container.
 
 repos:
   - name: main
-    url: https://github.com/<your-org>/<your-go-repo>.git
+    url: <your-org>/<your-repo>
     ref: main
 
-dev_container:
-  image: golang:1.25-bookworm
-  network_access: internal  # No external network access
-
 timeout: 1200
-budget_usd: 3.00
+budget_usd: 8.0
+provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
+
+profiles:
+  - readonly-github
 ```
 
-### Network Access Options
+### Custom Dev Container Images
 
-- **`internal`** (default) — No external network access, more secure
-- **`external`** — Full network access for package installs, API calls
+For complex environments, build your own dev container:
 
-### Available Base Images
+```dockerfile
+# Dockerfile.dev
+FROM node:18-slim
 
-Popular dev container images:
-- `golang:1.25-bookworm` — Go development
-- `node:20-alpine` — Node.js development  
-- `python:3.12-bookworm` — Python development
-- `ruby:3.3-alpine` — Ruby development
-- `openjdk:21-jdk-bookworm` — Java development
+# Install additional tools
+RUN apt-update && apt-get install -y \
+  git \
+  python3 \
+  postgresql-client \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install project-specific tools
+RUN npm install -g typescript eslint jest
+
+# Set working directory
+WORKDIR /workspace
+```
+
+```yaml
+dev_container:
+  image: your-registry.com/your-project/dev:latest
+  network_access: external  # if container needs to fetch dependencies
+```
 
 ### CLAUDE.md Injection
 
-If your repository has a `CLAUDE.md` file, it's automatically appended to the agent prompt to provide project context:
+If your repository has a `CLAUDE.md` file, its contents are automatically appended to the agent prompt:
 
-```yaml
-name: Context-Aware Agent
-prompt: |
-  You are a development assistant. Please help with the current task.
-  
-  # This agent will also see the content of CLAUDE.md from the repository
+```markdown
+# CLAUDE.md - Project Context
 
-repos:
-  - name: main
-    url: https://github.com/<your-org>/<your-repo>.git
-    ref: main
+## Project Structure
+
+This is a React web application with:
+- Frontend: React 18 + TypeScript + Vite
+- Backend: Node.js + Express + PostgreSQL  
+- Testing: Jest + React Testing Library
+- Deployment: Docker + Kubernetes
+
+## Development Workflow
+
+1. Run `npm install` to install dependencies
+2. Use `npm run dev` for development server
+3. Run `npm test` for unit tests
+4. Run `npm run lint` for code linting
+5. Use `npm run build` for production build
+
+## Code Standards
+
+- Use TypeScript for all new code
+- Follow ESLint configuration in .eslintrc.js
+- Write tests for all new features
+- Use Prettier for code formatting
+
+## Important Notes
+
+- Database migrations are in migrations/
+- Environment variables are documented in .env.example
+- API routes follow REST conventions
 ```
 
-### Dev Container Commands
-
-Agents can run commands in the dev container using the shim API:
-
-```yaml
-prompt: |
-  Use the dev container to run project commands:
-  
-  1. Run `make build` to build the project
-  2. Run `make test` to run tests
-  3. Run `go vet ./...` to check for issues
-  4. Report any problems found
-
-dev_container:
-  image: golang:1.25-bookworm
-```
+The agent receives this context automatically—no need to repeat it in the prompt.
 
 ## Multi-Repo Agents
 
-Agents can work across multiple repositories simultaneously:
+Some tasks require working across multiple repositories. Agents can clone and work with several repos simultaneously.
+
+### Multiple Repository Configuration
 
 ```yaml
-name: Cross-Repo Consistency Checker
-description: Ensure API contracts are consistent between service and client repos
-
-prompt: |
-  Compare the API definitions between the service and client repositories:
-  
-  1. Check `/workspace/service/api/` for OpenAPI specs
-  2. Check `/workspace/client/src/api/` for client implementations  
-  3. Report any inconsistencies
-  4. Suggest synchronization changes
+name: Cross-Repo Dependency Updater
+description: Updates shared library version across multiple projects
 
 repos:
-  - name: service
-    url: https://github.com/<your-org>/user-service.git
+  - name: shared-lib
+    url: <your-org>/shared-library
     ref: main
-  - name: client
-    url: https://github.com/<your-org>/user-client.git
+  - name: web-app
+    url: <your-org>/web-application  
     ref: main
+  - name: mobile-app
+    url: <your-org>/mobile-application
+    ref: main
+  - name: api-service
+    url: <your-org>/api-service
+    ref: develop
 
-timeout: 1800
-budget_usd: 4.00
+prompt: |
+  You have access to multiple repositories in your workspace:
+  
+  - /workspace/shared-lib/ — the shared library
+  - /workspace/web-app/ — web application
+  - /workspace/mobile-app/ — mobile application  
+  - /workspace/api-service/ — API service
+  
+  Your task:
+  1. Check the latest version of the shared library
+  2. Update package.json/requirements.txt in each consuming project
+  3. Run tests to ensure compatibility
+  4. Create separate PRs for each project with appropriate commit messages
+  
+  Work on one repository at a time and test thoroughly.
+
+timeout: 2400  # 40 minutes for multi-repo work
+budget_usd: 15.0
+provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
+
+profiles:
+  - github-pr-creation
 ```
 
 ### Workspace Layout
 
-Multi-repo agents get a workspace with all repositories:
+With multiple repos, the agent's workspace looks like:
 
 ```
 /workspace/
-├── service/          # First repo
-│   ├── api/
-│   └── src/
-└── client/           # Second repo
-    ├── src/
-    └── tests/
+  shared-lib/          # First repo
+    package.json
+    src/
+    ...
+  web-app/             # Second repo  
+    package.json
+    src/
+    ...
+  mobile-app/          # Third repo
+    package.json
+    src/
+    ...
+  api-service/         # Fourth repo
+    requirements.txt
+    api/
+    ...
 ```
 
-Refer to repositories by name in your prompts and file paths.
+### Multi-Repo Best Practices
+
+- **Start with discovery**: List all repos and their current state
+- **Work sequentially**: Focus on one repo at a time
+- **Test thoroughly**: Run tests in each repo before moving to the next
+- **Coordinate changes**: Ensure version compatibility across repos
+- **Create focused PRs**: One PR per repo with clear descriptions
 
 ## Cost Control
 
-Monitor and limit agent costs to prevent unexpected charges:
+AI agents can consume significant resources. Use these mechanisms to control costs:
 
-### Agent-Level Limits
+### Agent-Level Controls
 
 ```yaml
-name: Budget-Controlled Agent
-# ... other config ...
+name: Expensive Analysis Agent
 
-timeout: 1800        # 30 minutes maximum
-budget_usd: 5.00     # $5 maximum cost
+# Time limit (seconds)
+timeout: 1800  # 30 minutes maximum
+
+# Cost limit (USD)
+budget_usd: 25.0  # Stop if session exceeds $25
+
+# Model selection (smaller models cost less)
+model: claude-sonnet-4-20250514  # vs claude-opus-4-20250514
+
+prompt: |
+  You have a 30-minute timeout and $25 budget for this task.
+  Be efficient with your LLM calls and focus on the most important issues.
 ```
 
-Agents stop automatically when they hit either limit.
+### Policy-Based Cost Controls
 
-### Monitor Spending
+Limit expensive operations via policy rules:
+
+```yaml
+# .alcove/policy-rules/cost-control.yml
+rule_sets:
+  - name: llm-cost-control
+    enforcement_mode: enforce
+    rules:
+      # Block expensive models
+      - deny:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.model"
+              contains: "opus"
+      
+      # Limit token count
+      - deny:
+          method: POST
+          host: api.anthropic.com
+          path: "/v1/messages"
+          conditions:
+            - json_path: "$.max_tokens"
+              greater_than: 8192
+```
+
+### Monitor Usage
+
+Track spending across sessions:
 
 ```bash
-# View costs for recent sessions
-alcove list --since 24h --format table --columns name,cost,status
+# View session costs
+alcove list --since 7d --show-cost
 
-# View costs for specific agent
-alcove list --agent-name "code-reviewer" --since 7d
+# Detailed cost breakdown
+alcove cost-report --team "My Development Team" --since 30d
 
-# Team spending summary
-alcove teams spending --since 30d
+# Set team spending alerts
+alcove teams cost-alert "My Development Team" --limit 500.0 --period monthly
 ```
-
-### Cost Breakdown
-
-Session costs include:
-
-- **LLM API calls** — prompt tokens + completion tokens
-- **Compute time** — Skiff pod runtime (typically minimal)
-- **Storage** — session transcripts and artifacts (typically minimal)
-
-Most costs come from LLM API usage. Monitor token consumption for high-usage agents.
 
 ### Cost Optimization Tips
 
-1. **Use appropriate models** — `claude-haiku` for simple tasks, `claude-sonnet` for complex ones
-2. **Set reasonable timeouts** — prevent runaway sessions
-3. **Optimize prompts** — clear, concise prompts reduce back-and-forth
-4. **Use policy rules** — prevent unnecessary API calls
-5. **Monitor regularly** — review high-cost sessions and optimize
+- **Use Sonnet over Opus**: Claude Sonnet is faster and cheaper for most tasks
+- **Set reasonable timeouts**: Most tasks complete in 10-30 minutes
+- **Cache common results**: Avoid re-running expensive analysis repeatedly
+- **Batch operations**: Process multiple files in one session vs. separate sessions
+- **Profile-specific budgets**: Set lower budgets for experimental agents
 
 ## End-to-End Example: Automate Your Development Workflow
 
-Let's tie everything together with a complete `.alcove/` directory structure for a Go web service that automatically implements issues, reviews PRs, and merges changes.
+Let's put everything together by setting up Alcove to automatically implement GitHub issues on your project.
 
-### Directory Structure
+### Scenario
+
+You want Alcove to:
+1. Monitor GitHub issues labeled `ready-for-implementation`
+2. Automatically implement the feature described in the issue
+3. Create a pull request with tests
+4. Wait for CI to pass and request human review
+5. Automatically merge when approved
+
+### Complete .alcove/ Directory Structure
 
 ```
-<your-repo>/
-├── .alcove/
-│   ├── agents/
-│   │   ├── developer.yml
-│   │   ├── reviewer.yml
-│   │   └── security-scanner.yml
-│   ├── workflows/
-│   │   ├── feature-pipeline.yml
-│   │   └── security-audit.yml
-│   └── policy-rules/
-│       ├── github-read-write.yml
-│       └── github-read-only.yml
-├── CLAUDE.md                 # Project context for agents
-├── src/
-└── tests/
+.alcove/
+├── agents/
+│   ├── feature-developer.yml     # Implements features
+│   ├── pr-reviewer.yml           # Reviews pull requests  
+│   └── ci-fixer.yml              # Fixes CI failures
+├── workflows/
+│   └── feature-pipeline.yml     # End-to-end automation
+├── policy-rules/
+│   ├── github-dev.yml            # Read-write GitHub access
+│   └── cost-control.yml          # Budget and model limits
+└── README.md                     # Team documentation
 ```
 
-### 1. Project Context (CLAUDE.md)
+### 1. Feature Developer Agent
 
-```markdown
-# User Service API
-
-This is a Go microservice that provides user authentication and profile management.
-
-## Architecture
-- REST API built with Go 1.25 and gorilla/mux
-- PostgreSQL database with GORM
-- Redis for session storage
-- Docker for containerization
-
-## Development Workflow
-- Feature branches from `main`
-- All changes require PR review
-- CI runs tests and security scans
-- Squash merge to `main`
-
-## Code Standards
-- gofmt, go vet, and golangci-lint must pass
-- Unit tests required for new features
-- Integration tests for API endpoints
-- Documentation for public APIs
-
-## Testing
-- `make test` runs unit tests
-- `make integration` runs API tests
-- `make lint` runs all linters
-```
-
-### 2. Developer Agent (`.alcove/agents/developer.yml`)
+`.alcove/agents/feature-developer.yml`:
 
 ```yaml
-name: Go Developer
-description: Full-stack Go developer that implements features and fixes bugs
-
-prompt: |
-  You are an experienced Go developer working on a user service API. Your task is to implement the requested feature or fix the reported bug.
-  
-  ## Process:
-  1. Read the issue description carefully
-  2. Examine the existing codebase structure
-  3. Implement the changes following Go best practices
-  4. Add or update unit tests
-  5. Run `make test` and `make lint` to verify quality
-  6. Create clear commit messages
-  7. Push changes to the feature branch
-  
-  ## Quality Standards:
-  - Follow existing code patterns and structure
-  - Add comprehensive error handling
-  - Include unit tests for new functionality
-  - Update documentation for API changes
-  - Ensure thread safety for concurrent operations
-
-repos:
-  - name: main
-    url: https://github.com/<your-org>/user-service.git
-    ref: main
+name: Feature Developer
+description: Implements features from GitHub issues with tests
 
 dev_container:
-  image: golang:1.25-bookworm
+  image: node:18-slim
   network_access: internal
 
-timeout: 2400  # 40 minutes
-budget_usd: 8.00
-model: claude-sonnet-4-20250514
+prompt: |
+  You are a senior software engineer implementing a feature based on a GitHub issue.
+  
+  Your task:
+  1. Read the issue description carefully 
+  2. Analyze the existing codebase structure
+  3. Implement the feature with clean, maintainable code
+  4. Write comprehensive tests (unit and integration)
+  5. Update documentation if needed
+  6. Ensure code follows the project's style guidelines
+  
+  Work incrementally and test frequently. Create focused commits with clear messages.
+  Before finishing, run the full test suite to ensure nothing is broken.
+
+repos:
+  - name: main
+    url: <your-org>/<your-repo>
+    ref: main
+
+timeout: 3600  # 1 hour
+budget_usd: 20.0
 provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
 
 profiles:
-  - github-read-write
+  - github-dev
+  - cost-control
 ```
 
-### 3. Review Agent (`.alcove/agents/reviewer.yml`)
+### 2. PR Reviewer Agent
+
+`.alcove/agents/pr-reviewer.yml`:
 
 ```yaml
-name: Code Reviewer
-description: Senior Go developer focused on code quality and security
+name: PR Reviewer
+description: Reviews pull requests for code quality and best practices
 
 prompt: |
-  You are a senior Go developer performing a thorough code review. Analyze the pull request for:
+  You are an experienced code reviewer. Analyze this pull request and provide feedback.
   
-  ## Code Quality:
-  - Go idioms and best practices
-  - Error handling patterns
+  Review criteria:
+  - Code quality and maintainability
+  - Test coverage and quality
+  - Security considerations  
   - Performance implications
-  - Code organization and clarity
-  - Documentation completeness
+  - Documentation updates
+  - Adherence to project standards
   
-  ## Security:
-  - Input validation
-  - SQL injection prevention
-  - Authentication/authorization
-  - Data sanitization
-  - Dependency vulnerabilities
-  
-  ## Testing:
-  - Test coverage for new features
-  - Edge case handling
-  - Integration test needs
-  - Mock usage appropriateness
-  
-  ## Output Format:
-  Provide your review as structured feedback:
-  
-  **approved**: true/false
-  **comments**: Detailed feedback with specific file/line references
-  
-  If approved=false, explain what must be fixed before approval.
+  Provide specific, actionable feedback. If you approve, say "APPROVED".
+  If changes are needed, explain what should be improved.
 
 repos:
   - name: main
-    url: https://github.com/<your-org>/user-service.git
+    url: <your-org>/<your-repo>
     ref: main
 
-timeout: 1800  # 30 minutes
-budget_usd: 5.00
-model: claude-sonnet-4-20250514
+timeout: 900  # 15 minutes
+budget_usd: 8.0
 provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
 
 profiles:
-  - github-read-only
+  - readonly-github
 ```
 
-### 4. Security Scanner (`.alcove/agents/security-scanner.yml`)
+### 3. GitHub Policy Rules
+
+`.alcove/policy-rules/github-dev.yml`:
 
 ```yaml
-name: Security Scanner
-description: Automated security analysis for Go applications
-
-prompt: |
-  Perform a comprehensive security analysis of this Go web service:
-  
-  1. **Dependency Vulnerabilities**: Check go.mod for known CVEs
-  2. **Code Security**: Look for common vulnerabilities (OWASP Top 10)
-  3. **Configuration Issues**: Check for hardcoded secrets, weak defaults
-  4. **API Security**: Validate authentication and authorization
-  5. **Database Security**: Check for SQL injection risks
-  
-  Create a security report in SECURITY_REPORT.md with:
-  - Executive summary
-  - Detailed findings by severity (Critical, High, Medium, Low)
-  - Remediation recommendations
-  - Compliance notes (if applicable)
-
-repos:
-  - name: main
-    url: https://github.com/<your-org>/user-service.git
-    ref: main
-
-dev_container:
-  image: golang:1.25-bookworm
-  network_access: external  # For vulnerability database updates
-
-schedule:
-  cron: "0 9 * * 1"  # Weekly security scans
-  enabled: true
-
-timeout: 3600  # 60 minutes
-budget_usd: 10.00
-model: claude-sonnet-4-20250514
-provider: anthropic
-
-profiles:
-  - github-read-only
+rule_sets:
+  - name: github-development
+    enforcement_mode: enforce
+    rules:
+      # Read operations
+      - allow:
+          method: GET
+          host: api.github.com
+          path: "/**"
+      
+      # Branch and PR management
+      - allow:
+          method: POST
+          host: api.github.com
+          path: "/repos/*/git/refs"
+      - allow:
+          method: POST
+          host: api.github.com
+          path: "/repos/*/pulls"
+      - allow:
+          method: PATCH
+          host: api.github.com
+          path: "/repos/*/pulls/*"
+      
+      # Issue management
+      - allow:
+          method: PATCH
+          host: api.github.com
+          path: "/repos/*/issues/*"
+      
+      # Git operations via SSH/HTTPS
+      - allow:
+          method: "*"
+          host: github.com
+          path: "/**"
+      
+      # Block dangerous repository operations
+      - deny:
+          method: DELETE
+          host: api.github.com
+          path: "/repos/*"
+      - deny:
+          method: PATCH
+          host: api.github.com
+          path: "/repos/*/settings"
 ```
 
-### 5. Feature Pipeline (`.alcove/workflows/feature-pipeline.yml`)
+### 4. Feature Pipeline Workflow
+
+`.alcove/workflows/feature-pipeline.yml`:
 
 ```yaml
-name: Automated Feature Pipeline
-description: End-to-end automation for implementing GitHub issues
+name: Automated Feature Implementation
 
+# Trigger when GitHub issue gets labeled
 trigger:
-  github_issue_labeled:
-    repo: <your-org>/user-service
-    label: ready-for-dev
+  github:
+    events: ["issues.labeled"]
+    label: "ready-for-implementation"
 
 workflow:
+  # Step 1: Claim the issue
   - id: claim-issue
     type: bridge
-    action: update-issue
+    action: assign-issue
     inputs:
-      repo: <your-org>/user-service
-      issue_number: "{{trigger.issue_number}}"
-      assignee: alcove-bot
-      labels:
-        add: [in-progress]
-        remove: [ready-for-dev]
-
+      issue_number: "{{trigger.issue.number}}"
+      assignee: "alcove-bot"
+    outputs: [assigned]
+  
+  # Step 2: Implement the feature
   - id: implement
     type: agent
-    agent: go-developer
+    agent: Feature Developer
     depends: "claim-issue.Succeeded"
-    max_retries: 2
     inputs:
-      issue_number: "{{trigger.issue_number}}"
-      branch: "feature-{{trigger.issue_number}}"
-    outputs: [summary, changes_made]
-
+      issue_number: "{{trigger.issue.number}}"
+      issue_title: "{{trigger.issue.title}}"
+      issue_body: "{{trigger.issue.body}}"
+      branch: "feature-{{trigger.issue.number}}"
+    outputs: [summary, branch_created, files_changed]
+  
+  # Step 3: Create pull request
   - id: create-pr
     type: bridge
     action: create-pr
     depends: "implement.Succeeded"
     inputs:
-      repo: <your-org>/user-service
-      branch: "{{steps.implement.inputs.branch}}"
-      title: "feat: implement #{{trigger.issue_number}}"
+      branch: "{{implement.branch}}"
+      title: "Implement {{trigger.issue.title}} (#{{trigger.issue.number}})"
       body: |
-        Automated implementation of issue #{{trigger.issue_number}}.
+        ## Implementation Summary
+        {{implement.summary}}
         
-        ## Changes Made
-        {{steps.implement.outputs.changes_made}}
+        ## Files Changed
+        {{implement.files_changed}}
         
-        ## Implementation Summary  
-        {{steps.implement.outputs.summary}}
+        Closes #{{trigger.issue.number}}
         
-        ## Checklist
-        - [x] Unit tests added/updated
-        - [x] Code follows Go best practices
-        - [x] Documentation updated
-        - [x] CI passes locally
+        ---
         
-        /cc @team-leads for review
-      base: main
-
+        This PR was created automatically by Alcove. Please review and test thoroughly.
+    outputs: [pr_number, pr_url]
+  
+  # Step 4: Wait for CI to pass
   - id: await-ci
     type: bridge
     action: await-ci
-    depends: "create-pr.Succeeded || ci-fix.Succeeded"
-    max_iterations: 4
+    depends: "create-pr.Succeeded"
     inputs:
-      repo: <your-org>/user-service
-      pr: "{{steps.create-pr.outputs.pr_number}}"
-      timeout: 1200
-
-  - id: ci-fix
+      pr_number: "{{create-pr.pr_number}}"
+    timeout: 1800  # 30 minutes
+    outputs: [ci_status]
+  
+  # Step 5: Fix CI if it fails (up to 2 attempts)
+  - id: fix-ci
     type: agent
-    agent: go-developer
+    agent: Feature Developer
     depends: "await-ci.Failed"
-    max_iterations: 3
-    inputs:
-      branch: "{{steps.implement.inputs.branch}}"
-      ci_logs: "{{steps.await-ci.outputs.failure_logs}}"
-      pr_number: "{{steps.create-pr.outputs.pr_number}}"
-    outputs: [summary]
-
-  - id: code-review
-    type: agent
-    agent: code-reviewer
-    depends: "await-ci.Succeeded || revision.Succeeded"
-    max_iterations: 3
-    inputs:
-      pr: "{{steps.create-pr.outputs.pr_number}}"
-      repo: <your-org>/user-service
-    outputs: [approved, comments]
-    output_contract:
-      required: [approved, comments]
-      allowed_values:
-        approved: ["true", "false"]
-      routing_field: approved
-      success_value: "true"
-
-  - id: revision
-    type: agent
-    agent: go-developer
-    depends: "code-review.Failed"
     max_iterations: 2
     inputs:
-      branch: "{{steps.implement.inputs.branch}}"
-      feedback: "{{steps.code-review.outputs.comments}}"
-      pr_number: "{{steps.create-pr.outputs.pr_number}}"
-    outputs: [summary]
-
-  - id: merge
+      pr_number: "{{create-pr.pr_number}}"
+      ci_failures: "{{await-ci.failures}}"
+      task: "Fix CI failures and ensure tests pass"
+    outputs: [fixes_applied]
+  
+  # Step 6: Code review  
+  - id: code-review
+    type: agent
+    agent: PR Reviewer
+    depends: "await-ci.Succeeded || fix-ci.Succeeded"
+    inputs:
+      pr_number: "{{create-pr.pr_number}}"
+    outputs: [approved, feedback]
+  
+  # Step 7: Request human review
+  - id: request-review
     type: bridge
-    action: merge-pr
+    action: request-review
     depends: "code-review.Succeeded"
     inputs:
-      repo: <your-org>/user-service
-      pr: "{{steps.create-pr.outputs.pr_number}}"
-      merge_method: squash
-      delete_branch: true
-```
-
-### 6. Policy Rules (`.alcove/policy-rules/github-read-write.yml`)
-
-```yaml
-name: github-read-write
-description: Read/write GitHub access for development agents
-enforcement_mode: enforce
-
-rule_sets:
-  # Read permissions
-  - github-read-issues
-  - github-read-prs
-  - github-read-contents
-  - github-read-commits
-  - github-read-branches
-  - github-read-git
-  - github-read-actions
+      pr_number: "{{create-pr.pr_number}}"
+      reviewers: ["tech-lead", "senior-developer"]
+      message: |
+        Automated implementation complete. Code review passed with: {{code-review.feedback}}
+        
+        Please review for business logic and final approval.
+    outputs: [review_requested]
   
-  # Write permissions for development
-  - github-create-comment
-  - github-create-pr
-  - github-update-pr
-  - github-create-branch
-  - github-write-contents
-  - github-write-git
-
-denied_operations:
-  # Prevent dangerous operations
-  - github-merge-pr      # Only workflows can merge
-  - github-delete-branch # Let workflows handle cleanup
-  - github-create-issue  # Prevent spam
+  # Step 8: Auto-merge when approved (optional)
+  - id: auto-merge
+    type: bridge
+    action: merge-pr
+    depends: "request-review.Succeeded && pr.approved_by_human"
+    inputs:
+      pr_number: "{{create-pr.pr_number}}"
+      merge_method: "squash"
+      commit_message: "{{trigger.issue.title}} (#{{trigger.issue.number}})\n\n{{implement.summary}}"
 ```
 
-### 7. Setup Commands
-
-After creating all files:
+### 5. Set Up the Pipeline
 
 ```bash
-# 1. Register repository
-alcove agents repos add https://github.com/<your-org>/user-service.git
+# 1. Commit all configuration
+git add .alcove/
+git commit -m "Add complete Alcove automation pipeline"
+git push
 
-# 2. Sync agents and workflows
+# 2. Register repository and sync
+alcove agents repos add https://github.com/<your-org>/<your-repo>
 alcove agents sync
 
-# 3. Verify everything loaded
+# 3. Verify everything is configured
 alcove agents list
 alcove workflows list
+alcove agents validate
 
-# 4. Test with a simple issue
-# Create a GitHub issue and add the "ready-for-dev" label
+# 4. Test with a manual run
+alcove workflows run "Automated Feature Implementation" \
+  --input issue_number=42
 ```
 
-### 8. Monitoring
+### 6. Test the Pipeline
 
-Monitor your automated pipeline:
+Create a GitHub issue with the label `ready-for-implementation`:
 
-```bash
-# Watch workflow runs
-alcove workflows runs --status running
+1. **Create issue**: Describe a small feature or bug fix
+2. **Add label**: Apply the `ready-for-implementation` label
+3. **Monitor**: Watch the dashboard for workflow execution
+4. **Review**: Check the generated PR and provide final approval
 
-# Monitor session activity
-alcove list --since 1h
-
-# Check costs
-alcove teams spending --since 24h
-
-# View specific workflow run details
-alcove workflows run-details <run-id>
-```
-
-This complete setup provides:
-- ✅ Automatic issue implementation when labeled `ready-for-dev`
-- ✅ Quality code review before merging
-- ✅ CI integration with automatic fixes
-- ✅ Bounded retry loops to prevent infinite cycles
-- ✅ Weekly security scans
-- ✅ Cost controls and monitoring
-- ✅ Secure policy rules
+**Expected flow:**
+- Issue labeled → Workflow triggers automatically
+- Feature Developer agent claims issue and implements feature
+- PR created with implementation and tests
+- CI runs → passes or gets fixed automatically
+- Code review agent provides feedback
+- Human reviewers get notification for final approval
+- PR merges automatically when approved
 
 ## Troubleshooting
 
-### Repository Sync Issues
+### Sync Issues
 
-**Problem:** Agents don't appear after running `alcove agents sync`
-
-**Solutions:**
+**Agent not appearing after sync:**
 ```bash
-# Check repo registration
+# Check sync status
 alcove agents repos list
+alcove agents repos sync --verbose
 
-# Verify YAML syntax
-cd .alcove/agents && yamllint *.yml
+# Validate YAML locally
+alcove agents validate .alcove/agents/
 
-# Check sync status with details
-alcove agents sync --verbose
-
-# Common fixes:
-# - Ensure .alcove/agents/ directory exists
-# - Verify YAML files have .yml extension (not .yaml)
-# - Check that repo URL is accessible
-# - Confirm team has access to repository
+# Check file permissions and git status
+git status
+git log --oneline -5
 ```
 
-### Policy Rule Violations
+**Common YAML errors:**
+- Incorrect indentation (use spaces, not tabs)
+- Missing required fields (`name`, `prompt`, `repos`)
+- Invalid cron syntax in schedules
+- Typos in field names (`repo` instead of `repos`)
 
-**Problem:** Agent sessions fail with "Request denied by policy"
+### Permission and Scope Issues
 
-**Solutions:**
+**Agent can't access external APIs:**
 ```bash
-# Check proxy logs for denied requests
-alcove logs <session-id> --proxy | grep -i denied
+# Check policy rules
+alcove agents describe "Your Agent" --show-policies
 
-# Temporarily switch to monitor mode
-# In .alcove/policy-rules/your-profile.yml:
-enforcement_mode: monitor  # Change from 'enforce'
+# View denied requests
+alcove logs ses_abc123 --proxy --show-denied
 
-# Common fixes:
-# - Add missing rule sets to your policy profile
-# - Check if agent needs 'external' network access
-# - Verify credentials are registered correctly
-# - Ensure policy profile is referenced in agent YAML
+# Test credentials
+alcove credentials test github
+alcove credentials test anthropic
 ```
 
-### Agent Can't Access Services
+**Common scope violations:**
+- Agent tries to write to GitHub without write permissions
+- LLM requests blocked by cost controls
+- Network access denied (check `dev_container.network_access`)
 
-**Problem:** Agent gets connection errors to GitHub, GitLab, etc.
+### Session Failures
 
-**Solutions:**
+**Sessions failing immediately:**
 ```bash
-# Verify credentials are registered
-alcove credentials list
+# Check session details
+alcove status ses_abc123 --verbose
+alcove logs ses_abc123 --errors
 
-# Check if agent needs external network access
-# In agent YAML:
-dev_container:
-  network_access: external  # Change from 'internal'
-
-# Verify corporate proxy settings
-export HTTP_PROXY=http://proxy.company.com:8080
-alcove --proxy-url $HTTP_PROXY agents run <agent>
-
-# Check that required policy rules are enabled
+# Common issues
+# - Invalid credentials references
+# - Repository access denied  
+# - Budget/timeout too restrictive
+# - Dev container image not accessible
 ```
 
-### Session Errors
+**Sessions timing out:**
+```bash
+# Increase timeout in agent definition
+timeout: 3600  # 1 hour instead of 600 (10 min)
 
-**Common Session Failures:**
+# Or optimize prompt for faster execution
+prompt: |
+  You have 10 minutes to complete this task. Focus on the essentials:
+  1. Identify the core issue
+  2. Make minimal changes to fix it
+  3. Test quickly and report results
+```
 
-| Error | Cause | Solution |
-|-------|--------|----------|
-| `timeout` | Agent exceeded time limit | Increase `timeout` in agent YAML or optimize prompts |
-| `budget_exceeded` | Hit cost limit | Increase `budget_usd` or use more efficient model |
-| `failed_to_clone` | Git access issues | Check repository URL and credentials |
-| `policy_violation` | Policy rules blocked request | Update policy rules or switch to `monitor` mode |
-| `container_failed` | Dev container issue | Check `dev_container.image` and network settings |
-| `no_available_workers` | Resource exhaustion | Contact admin or try again later |
+### Cost and Budget Issues
+
+**Sessions stopped due to budget:**
+```bash
+# Check current spending
+alcove cost-report --since 7d
+
+# Increase budget or optimize usage
+budget_usd: 15.0  # instead of 5.0
+
+# Use cheaper model
+model: claude-sonnet-4-20250514  # instead of opus
+```
+
+**Unexpected high costs:**
+```bash
+# Identify expensive sessions
+alcove list --since 7d --show-cost --sort-by cost
+
+# Review session transcripts for excessive LLM calls
+alcove logs ses_expensive123 --show-tokens
+```
 
 ### Workflow Issues
 
-**Problem:** Workflow steps don't trigger properly
-
-**Solutions:**
+**Workflow stuck in pending:**
 ```bash
-# Check workflow syntax
-cd .alcove/workflows && yamllint *.yml
+# Check workflow run status
+alcove workflows run-status <run-id>
 
-# View workflow run details
-alcove workflows run-details <run-id>
+# Look for dependency issues
+alcove workflows run-details <run-id> --show-dependencies
 
-# Verify trigger configuration
-# For GitHub label triggers, ensure:
-# - Webhook is configured (admin task)
-# - Label name matches exactly
-# - Repository URL is correct
-
-# Check depends expressions
-# Use simple syntax: "step-id.Succeeded"
-# For complex logic: "(step-a.Succeeded || step-b.Succeeded) && step-c.Succeeded"
+# Common causes:
+# - Depends expression never becomes true
+# - Required outputs not generated by previous step
+# - Agent or bridge action failing silently
 ```
 
-### Performance Issues
+**Bridge actions failing:**
+```bash
+# Check bridge action logs
+alcove logs <session-id> --bridge-actions
 
-**Problem:** Agents are slow or expensive
+# Common bridge action issues:
+# - Invalid GitHub/GitLab API credentials
+# - Insufficient permissions for PR creation
+# - Branch protection rules blocking auto-merge
+```
 
-**Solutions:**
-1. **Optimize prompts** — Be specific, avoid repetitive instructions
-2. **Use appropriate models** — `claude-haiku` for simple tasks
-3. **Enable dev containers** — For build/test tasks requiring tools
-4. **Set reasonable timeouts** — Prevent runaway sessions
-5. **Monitor token usage** — Check session logs for excessive API calls
+### Development Container Issues
+
+**Dev container not starting:**
+```bash
+# Check image availability
+podman pull node:18-slim  # or your custom image
+
+# Verify network access setting
+dev_container:
+  network_access: external  # if image needs internet for setup
+```
+
+**Commands failing in dev container:**
+```bash
+# Test container locally
+podman run --rm -it node:18-slim /bin/bash
+
+# Check /workspace mount and permissions
+alcove logs ses_abc123 --dev-container
+```
 
 ### Getting Help
 
-**Debug Information:**
-```bash
-# Gather diagnostic info
-alcove version
-alcove config validate
-alcove teams list
-alcove agents repos status
+**When to escalate:**
+- Persistent authentication failures despite valid credentials
+- Workflows triggering but never executing  
+- Bridge instance returning 500 errors
+- Data corruption or lost session transcripts
 
-# Session diagnostics
-alcove logs <session-id>
-alcove logs <session-id> --proxy
-alcove status <session-id>
-```
-
-**Contact Support:**
-- Include output from diagnostic commands above
-- Provide session IDs for failing runs
-- Describe expected vs actual behavior
-- Include relevant YAML configuration files (remove sensitive data)
+**Self-service debugging:**
+- Enable verbose logging: `alcove --debug logs ses_abc123`
+- Export session for analysis: `alcove export ses_abc123`
+- Test individual components: `alcove agents run` → `alcove workflows run`
+- Check system status: `alcove config validate --verbose`
 
 ## Next Steps
 
-Now that you have Alcove set up for your project, explore these advanced topics:
+You've now learned the fundamentals of using Alcove to automate your development workflow. Here's how to expand your usage:
 
 ### Advanced Guides
 
-- **[Workflow Authoring Guide](workflow-authoring.md)** — Complex workflow patterns, parallel execution, conditional logic
-- **[Configuration Reference](configuration.md)** — Complete YAML schema and options reference
-- **[CLI Reference](cli-reference.md)** — Full command documentation with examples
-
-### Starter Agents
-
-The Alcove repository includes proven agent definitions you can copy and customize:
-
-```bash
-# Browse starter agents
-ls /workspace/starter-agents/.alcove/agents/
-
-# Example starter agents:
-# - autonomous-developer.yml — Full-stack development agent
-# - code-reviewer.yml — Thorough code review agent
-# - security-auditor.yml — Security vulnerability scanner
-# - doc-updater.yml — Documentation maintenance agent
-# - test-runner.yml — Automated testing agent
-```
+- **[Workflow Authoring Guide](workflow-authoring.md)** — Complex workflow patterns, advanced dependency expressions, error handling
+- **[CLI Reference](cli-reference.md)** — Complete command documentation with examples
+- **[Configuration Reference](configuration.md)** — Full YAML schema and all configuration options
 
 ### Integration Patterns
 
-**CI/CD Integration:**
-- Use `alcove agents run` in your CI pipeline
-- Trigger workflows from CI events via webhooks
-- Export workflow results for reporting
+- **Multi-team workflows** — Cross-team collaboration, shared agents, permission models
+- **CI/CD integration** — Triggering Alcove workflows from GitHub Actions, GitLab CI
+- **Monitoring and alerting** — Setting up dashboards, cost alerts, failure notifications
 
-**Issue Tracking Integration:**
-- GitHub Issues (built-in label triggers)
-- GitLab Issues (built-in triggers)
-- JIRA (policy rules provided)
-- Custom webhooks for other systems
+### Security and Compliance
 
-**Notification Integration:**
-- Slack notifications via webhook agents
-- Email alerts via SMTP bridges
-- Custom integrations via API
+- **Advanced policy rules** — Complex scope restrictions, audit logging, compliance frameworks  
+- **Credential rotation** — Automated token refresh, credential lifecycle management
+- **Network isolation** — VPN integration, air-gapped environments
 
-### Production Deployment
+### Starter Agents and Templates
 
-When ready to scale Alcove for team use:
+Explore the catalog for pre-built agents:
 
-1. **Set up production instance** — See [Getting Started Guide](getting-started.md)
-2. **Configure SSO** — OIDC, SAML, or corporate identity providers
-3. **Set up monitoring** — Session metrics, cost tracking, error alerting
-4. **Establish governance** — Agent review process, policy standards
-5. **Train team members** — Share this adopter guide and best practices
+```bash
+alcove catalog browse --category development
+alcove catalog enable code-reviewer
+alcove catalog enable security-scanner
+alcove catalog enable documentation-generator
+```
 
-### Community
+### Community and Support
 
-Join the Alcove community for tips, examples, and support:
+- **GitHub Discussions** — Ask questions and share patterns with other adopters
+- **Documentation updates** — Contribute improvements to this guide
+- **Feature requests** — Suggest new capabilities for future Alcove releases
 
-- **GitHub Discussions** — Ask questions and share agent definitions
-- **Documentation** — Contribute improvements and examples
-- **Issue Reports** — Help improve Alcove by reporting bugs
+### Measuring Success
 
-**Happy automating!** 🤖
+Track your automation ROI:
+
+```bash
+# Development velocity metrics  
+alcove metrics --team "My Team" --metric="issues-implemented" --since 30d
+alcove metrics --team "My Team" --metric="pr-cycle-time" --since 30d
+
+# Cost and efficiency
+alcove cost-report --team "My Team" --since 30d
+alcove sessions-summary --team "My Team" --since 30d
+```
+
+### Scaling Up
+
+As your team grows comfortable with Alcove:
+
+1. **Expand agent coverage** — Add agents for testing, documentation, security scanning
+2. **Automate more workflows** — Release management, dependency updates, incident response  
+3. **Cross-repository orchestration** — Multi-repo feature development, organization-wide updates
+4. **Custom tooling** — Build domain-specific agents for your technology stack
 
 ---
 
-*This guide covered the essentials of using Alcove as an adopter. For contributing to Alcove's development, see the [Development Guide](development-guide.md). For self-hosting Alcove, see the [Getting Started Guide](getting-started.md).*
+**Welcome to automated development with Alcove!** Start with simple agents and gradually build more sophisticated workflows. The key is to begin with tasks that are well-defined and gradually expand as you see the value.
+
+Remember: Alcove agents work best on concrete, automatable tasks. Focus on repetitive development work that follows predictable patterns, and let your human developers handle the creative, strategic, and ambiguous challenges.

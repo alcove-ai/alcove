@@ -1,45 +1,34 @@
-name: Basic Feature Implementation
-description: Implement a feature and create a PR
-
-trigger:
-  github_issue_labeled:
-    repo: <your-org>/<your-repo>
-    label: ready-for-dev
+name: Basic Code Review Workflow
+description: Simple 2-step workflow for new adopters
 
 workflow:
-  # Step 1: Agent implements the feature
-  - id: implement
+  # Step 1: Analyze the code
+  - id: analyze
     type: agent
-    agent: developer-agent
-    inputs:
-      issue_number: "{{trigger.issue_number}}"
-      branch: "feature-{{trigger.issue_number}}"
-    outputs: [summary, changes_made]
+    agent: Hello World Agent
+    outputs: [summary, language, framework, suggestion]
 
-  # Step 2: Bridge creates a pull request
-  - id: create-pr
+  # Step 2: Create a GitHub issue with findings (only if suggestions found)
+  - id: create-issue
     type: bridge
-    action: create-pr
-    depends: "implement.Succeeded"
+    action: create-issue
+    depends: "analyze.Succeeded && analyze.suggestion"
     inputs:
-      repo: <your-org>/<your-repo>
-      branch: "{{steps.implement.inputs.branch}}"
-      title: "Implement #{{trigger.issue_number}}"
+      title: "Code Review Suggestions from Alcove"
       body: |
-        Automated implementation of issue #{{trigger.issue_number}}.
+        ## Project Analysis
 
-        ## Changes Made
-        {{steps.implement.outputs.changes_made}}
+        **Language/Framework:** {{analyze.language}} / {{analyze.framework}}
 
-        ## Summary
-        {{steps.implement.outputs.summary}}
-      base: main
+        **Summary:** {{analyze.summary}}
 
-  # Step 3: Wait for CI to pass (optional)
-  - id: await-ci
-    type: bridge
-    action: await-ci
-    depends: "create-pr.Succeeded"
-    inputs:
-      repo: <your-org>/<your-repo>
-      pr: "{{steps.create-pr.outputs.pr_number}}"
+        ## Suggested Improvement
+        {{analyze.suggestion}}
+
+        ---
+        *Created by Alcove Basic Workflow*
+      labels: ["enhancement", "alcove-generated"]
+
+# Trigger this workflow manually for learning
+trigger:
+  manual: true
