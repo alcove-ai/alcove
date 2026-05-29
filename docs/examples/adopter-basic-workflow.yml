@@ -1,0 +1,45 @@
+name: Basic Feature Implementation
+description: Implement a feature and create a PR
+
+trigger:
+  github_issue_labeled:
+    repo: <your-org>/<your-repo>
+    label: ready-for-dev
+
+workflow:
+  # Step 1: Agent implements the feature
+  - id: implement
+    type: agent
+    agent: developer-agent
+    inputs:
+      issue_number: "{{trigger.issue_number}}"
+      branch: "feature-{{trigger.issue_number}}"
+    outputs: [summary, changes_made]
+
+  # Step 2: Bridge creates a pull request
+  - id: create-pr
+    type: bridge
+    action: create-pr
+    depends: "implement.Succeeded"
+    inputs:
+      repo: <your-org>/<your-repo>
+      branch: "{{steps.implement.inputs.branch}}"
+      title: "Implement #{{trigger.issue_number}}"
+      body: |
+        Automated implementation of issue #{{trigger.issue_number}}.
+
+        ## Changes Made
+        {{steps.implement.outputs.changes_made}}
+
+        ## Summary
+        {{steps.implement.outputs.summary}}
+      base: main
+
+  # Step 3: Wait for CI to pass (optional)
+  - id: await-ci
+    type: bridge
+    action: await-ci
+    depends: "create-pr.Succeeded"
+    inputs:
+      repo: <your-org>/<your-repo>
+      pr: "{{steps.create-pr.outputs.pr_number}}"

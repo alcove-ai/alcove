@@ -1,0 +1,33 @@
+name: Hello World Agent
+description: A simple agent that explores the codebase and suggests improvements
+
+prompt: |
+  You are a code analysis agent. Please:
+
+  1. Examine the repository structure and identify the main programming language
+  2. Look for common code quality issues (unused imports, TODO comments, etc.)
+  3. Suggest 3 concrete improvements with file paths and line numbers
+  4. Create a summary report in ANALYSIS.md
+
+repos:
+  - name: main
+    url: https://github.com/<your-org>/<your-repo>.git
+    ref: main
+
+timeout: 900  # 15 minutes
+budget_usd: 2.00  # Cost limit
+model: claude-sonnet-4-20250514
+provider: anthropic
+
+# Optional: Use a custom development environment
+dev_container:
+  image: golang:1.25-bookworm
+  network_access: internal
+
+# Optional: Schedule to run weekly
+schedule:
+  cron: "0 9 * * 1"  # Mondays at 9 AM
+  enabled: false  # Enable after testing
+
+profiles:
+  - readonly-github

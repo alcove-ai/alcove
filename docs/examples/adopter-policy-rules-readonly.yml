@@ -1,0 +1,33 @@
+name: readonly-github
+description: Safe read-only access to GitHub API for code analysis
+enforcement_mode: enforce  # Use 'monitor' for testing
+
+rule_sets:
+  # Allow basic repository information
+  - github-read-issues
+  - github-read-prs
+  - github-read-contents
+  - github-read-commits
+  - github-read-branches
+  - github-read-git
+  - github-read-actions
+  - github-read-releases
+
+# Explicitly deny write operations for safety
+denied_operations:
+  - github-create-issue
+  - github-create-comment
+  - github-create-pr
+  - github-update-pr
+  - github-merge-pr
+  - github-write-contents
+  - github-write-git
+  - github-create-branch
+  - github-delete-branch
+  - github-write-releases
+
+# Additional security settings
+max_request_size: 1048576  # 1MB limit
+rate_limit:
+  requests_per_minute: 60
+  burst_size: 10
