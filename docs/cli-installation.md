@@ -282,3 +282,11 @@ make build
 ```
 
 This creates binaries in the `bin/` directory for the current platform only.
+
+## Next Steps
+
+Now that you have the CLI installed, you're ready to start using Alcove:
+
+- **New to Alcove?** Follow the [Adopter Guide](adopter-guide.md) for a complete walkthrough of connecting to an instance, creating agents, and setting up workflows.
+- **Self-hosting?** See the [Getting Started Guide](getting-started.md) to run Alcove on your own infrastructure.
+- **Need command reference?** Check the [CLI Reference](cli-reference.md) for detailed documentation of all commands.

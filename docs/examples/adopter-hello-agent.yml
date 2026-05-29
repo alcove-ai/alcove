@@ -1,0 +1,32 @@
+name: Hello World Agent
+description: A simple getting started agent for new adopters
+
+prompt: |
+  You are a friendly assistant helping someone understand their codebase.
+
+  Please:
+  1. Explore the repository and understand its structure
+  2. Identify the main programming language and framework used
+  3. Summarize what the project does in 2-3 sentences
+  4. Suggest one specific improvement that could benefit the project
+
+  Be helpful and encouraging. This is their first time using Alcove!
+
+repos:
+  - name: main
+    url: <your-org>/<your-repo>
+    ref: main
+
+# Cost and time controls for learning
+timeout: 600          # 10 minutes
+budget_usd: 3.0       # $3 limit for first experiments
+
+# LLM configuration
+provider: anthropic
+model: claude-sonnet-4-20250514
+credentials:
+  ANTHROPIC_API_KEY: anthropic
+
+# Start with read-only access for safety
+profiles:
+  - readonly-github

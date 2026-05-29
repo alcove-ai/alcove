@@ -1,0 +1,34 @@
+name: Basic Code Review Workflow
+description: Simple 2-step workflow for new adopters
+
+workflow:
+  # Step 1: Analyze the code
+  - id: analyze
+    type: agent
+    agent: Hello World Agent
+    outputs: [summary, language, framework, suggestion]
+
+  # Step 2: Create a GitHub issue with findings (only if suggestions found)
+  - id: create-issue
+    type: bridge
+    action: create-issue
+    depends: "analyze.Succeeded && analyze.suggestion"
+    inputs:
+      title: "Code Review Suggestions from Alcove"
+      body: |
+        ## Project Analysis
+
+        **Language/Framework:** {{analyze.language}} / {{analyze.framework}}
+
+        **Summary:** {{analyze.summary}}
+
+        ## Suggested Improvement
+        {{analyze.suggestion}}
+
+        ---
+        *Created by Alcove Basic Workflow*
+      labels: ["enhancement", "alcove-generated"]
+
+# Trigger this workflow manually for learning
+trigger:
+  manual: true
