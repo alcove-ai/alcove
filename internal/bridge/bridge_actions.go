@@ -83,6 +83,7 @@ func RegisterBridgeActions() map[string]BridgeActionHandler {
 		"jira-transition-issue": bridgeActionJiraTransitionIssue,
 		"jira-add-comment":      bridgeActionJiraAddComment,
 		"jira-search-issues":    bridgeActionJiraSearchIssues,
+		"jira-update-issue":     bridgeActionJiraUpdateIssue,
 
 		// Search actions.
 		"search-gh-issues": bridgeActionSearchGHIssues,
@@ -525,6 +526,21 @@ func ListBridgeActionSchemas() []BridgeActionSchema {
 				"issues":     "[]object - Array of issue objects with key/summary/status/type/priority/url",
 				"issue_keys": "[]string - Array of issue keys for easy iteration",
 				"total":      "int - Total number of matching issues",
+			},
+		},
+		{
+			Name:        "jira-update-issue",
+			Description: "Update JIRA issue metadata (labels, assignee, priority, summary)",
+			Inputs: map[string]string{
+				"issue_key":      "string (required) - JIRA issue key (e.g., 'PROJ-123')",
+				"add_labels":     "[]string (optional) - Labels to add",
+				"remove_labels":  "[]string (optional) - Labels to remove",
+				"assignee":       "string (optional) - Set assignee (account ID, email, or username)",
+				"priority":       "string (optional) - Set priority name",
+				"summary":        "string (optional) - Update title/summary",
+			},
+			Outputs: map[string]string{
+				"updated": "bool - Whether the issue was updated",
 			},
 		},
 		{

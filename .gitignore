@@ -45,3 +45,4 @@ alcove.conf
 
 # OS
 .DS_Store
+.gocache/

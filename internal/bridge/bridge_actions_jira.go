@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -494,6 +495,166 @@ func jiraRequest(ctx context.Context, credential, method, reqURL string, body []
 	}
 
 	return respBody, nil
+}
+
+// bridgeActionJiraUpdateIssue updates JIRA issue metadata (labels, assignee, priority, summary).
+func bridgeActionJiraUpdateIssue(ctx context.Context, inputs map[string]interface{}, credStore *CredentialStore, teamID string) (*BridgeActionResult, error) {
+	issueKey := getStringInput(inputs, "issue_key")
+	if issueKey == "" {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  "missing required input: issue_key",
+		}, nil
+	}
+
+	// Validate issue_key format to prevent path traversal
+	issueKeyRegex := regexp.MustCompile(`^[A-Z][A-Z0-9_]+-\d+$`)
+	if !issueKeyRegex.MatchString(issueKey) {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("invalid issue_key format: %s (must match [A-Z][A-Z0-9_]+-\\d+)", issueKey),
+		}, nil
+	}
+
+	token, apiHost, err := credStore.AcquireSCMTokenForOwner(ctx, "jira", teamID)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("failed to acquire JIRA token: %v", err),
+		}, nil
+	}
+
+	if apiHost == "" {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  "jira credential has no api_host configured — set api_host when creating the jira credential",
+		}, nil
+	}
+
+	// Extract inputs
+	addLabels := getStringSliceInput(inputs, "add_labels")
+	removeLabels := getStringSliceInput(inputs, "remove_labels")
+	assignee := getStringInput(inputs, "assignee")
+	priority := getStringInput(inputs, "priority")
+	summary := getStringInput(inputs, "summary")
+
+	// Build request body with update and fields sections
+	reqBody := make(map[string]interface{})
+
+	// Build update section for incremental label changes
+	if len(addLabels) > 0 || len(removeLabels) > 0 {
+		labelOps := make([]map[string]interface{}, 0)
+
+		for _, label := range addLabels {
+			labelOps = append(labelOps, map[string]interface{}{
+				"add": label,
+			})
+		}
+
+		for _, label := range removeLabels {
+			labelOps = append(labelOps, map[string]interface{}{
+				"remove": label,
+			})
+		}
+
+		if len(labelOps) > 0 {
+			reqBody["update"] = map[string]interface{}{
+				"labels": labelOps,
+			}
+		}
+	}
+
+	// Build fields section for direct field replacement
+	fields := make(map[string]interface{})
+
+	if summary != "" {
+		fields["summary"] = summary
+	}
+
+	if priority != "" {
+		fields["priority"] = map[string]interface{}{
+			"name": priority,
+		}
+	}
+
+	if assignee != "" {
+		// Auto-detect assignee format and build appropriate assignee object
+		assigneeField := map[string]interface{}{}
+
+		if strings.Contains(assignee, "@") {
+			// Looks like an email - try email lookup first, then treat as emailAddress
+			assigneeField["emailAddress"] = assignee
+		} else if len(assignee) == 24 || strings.HasPrefix(assignee, "557058:") {
+			// Looks like Atlassian account ID format
+			assigneeField["accountId"] = assignee
+		} else {
+			// Treat as username/displayName for legacy/self-hosted Jira
+			assigneeField["name"] = assignee
+		}
+
+		fields["assignee"] = assigneeField
+	}
+
+	if len(fields) > 0 {
+		reqBody["fields"] = fields
+	}
+
+	// If both update and fields are empty, that's a valid no-op update
+	if len(reqBody) == 0 {
+		return &BridgeActionResult{
+			Status: "succeeded",
+			Outputs: map[string]interface{}{
+				"updated": true,
+			},
+		}, nil
+	}
+
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("error marshaling request: %v", err),
+		}, nil
+	}
+
+	// Update issue
+	updateURL := fmt.Sprintf("%s/rest/api/3/issue/%s", apiHost, url.PathEscape(issueKey))
+	respData, err := jiraRequest(ctx, token, "PUT", updateURL, reqJSON)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("error updating issue %s: %v", issueKey, err),
+		}, nil
+	}
+
+	// Handle 204 No Content response - JIRA PUT returns empty body on success
+	if len(respData) == 0 {
+		return &BridgeActionResult{
+			Status: "succeeded",
+			Outputs: map[string]interface{}{
+				"updated": true,
+			},
+		}, nil
+	}
+
+	// If there's response data, try to parse it (some JIRA configurations might return data)
+	var updateResp interface{}
+	if err := json.Unmarshal(respData, &updateResp); err != nil {
+		// If parsing fails, but we got here, the update likely succeeded
+		return &BridgeActionResult{
+			Status: "succeeded",
+			Outputs: map[string]interface{}{
+				"updated": true,
+			},
+		}, nil
+	}
+
+	return &BridgeActionResult{
+		Status: "succeeded",
+		Outputs: map[string]interface{}{
+			"updated": true,
+		},
+	}, nil
 }
 
 // wrapTextInADF converts plain text to minimal Atlassian Document Format.
