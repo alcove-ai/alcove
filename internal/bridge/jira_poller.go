@@ -79,21 +79,32 @@ func (jp *JiraPoller) Start(ctx context.Context) {
 // jiraPollTarget holds the information needed to match and dispatch a JIRA-
 // triggered workflow.
 type jiraPollTarget struct {
-	workflowID string
-	teamID     string
-	trigger    *JiraTrigger
+	sourceKey string // Source key to resolve workflow ID at dispatch time
+	teamID    string
+	trigger   *JiraTrigger
+	name      string // For logging
 }
 
-// PollAll queries all workflows with JIRA triggers and polls JIRA for matching
+// PollAll queries all schedules with JIRA triggers and polls JIRA for matching
 // recently-updated issues.
 func (jp *JiraPoller) PollAll(ctx context.Context) {
+	// Check system mode — skip polling when paused.
+	var mode string
+	_ = jp.db.QueryRow(ctx, "SELECT value FROM system_state WHERE key = 'mode'").Scan(&mode)
+	if mode == "paused" {
+		return
+	}
+
 	rows, err := jp.db.Query(ctx, `
-		SELECT w.id, w.name, w.parsed, w.team_id
-		FROM workflows w
-		WHERE w.parsed IS NOT NULL
+		SELECT s.name, s.event_config, s.team_id, s.source_key
+		FROM schedules s
+		WHERE s.enabled = true
+		  AND COALESCE(s.trigger_type, 'cron') IN ('event', 'cron-and-event')
+		  AND s.event_config IS NOT NULL
+		  AND s.event_config::jsonb ? 'jira'
 	`)
 	if err != nil {
-		log.Printf("jira-poller: error querying workflows: %v", err)
+		log.Printf("jira-poller: error querying schedules: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -101,24 +112,29 @@ func (jp *JiraPoller) PollAll(ctx context.Context) {
 	var targets []jiraPollTarget
 
 	for rows.Next() {
-		var wfID, wfName, teamID string
-		var parsedJSON []byte
-		if err := rows.Scan(&wfID, &wfName, &parsedJSON, &teamID); err != nil {
+		var name, teamID, sourceKey string
+		var eventConfigJSON []byte
+		if err := rows.Scan(&name, &eventConfigJSON, &teamID, &sourceKey); err != nil {
+			log.Printf("jira-poller: error scanning schedule: %v", err)
 			continue
 		}
 
-		var wd WorkflowDefinition
-		if err := json.Unmarshal(parsedJSON, &wd); err != nil {
+		var trigger EventTrigger
+		if err := json.Unmarshal(eventConfigJSON, &trigger); err != nil {
+			log.Printf("jira-poller: error unmarshaling event_config for %s: %v", name, err)
+			continue
+		}
+		if trigger.Jira == nil {
+			log.Printf("jira-poller: schedule %s has no jira trigger config", name)
 			continue
 		}
 
-		if wd.Trigger != nil && wd.Trigger.Jira != nil {
-			targets = append(targets, jiraPollTarget{
-				workflowID: wfID,
-				teamID:     teamID,
-				trigger:    wd.Trigger.Jira,
-			})
-		}
+		targets = append(targets, jiraPollTarget{
+			sourceKey: sourceKey,
+			teamID:    teamID,
+			trigger:   trigger.Jira,
+			name:      name,
+		})
 	}
 
 	if len(targets) == 0 {
@@ -260,19 +276,30 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 
 		for _, target := range targets {
 			if target.trigger.Matches(issueProject, issueComponents, issue.Fields.Labels) {
+				// Look up the workflow ID by source_key
+				var workflowID string
+				err := jp.db.QueryRow(ctx,
+					`SELECT id FROM workflows WHERE source_key = $1 AND team_id = $2`,
+					target.sourceKey, target.teamID,
+				).Scan(&workflowID)
+				if err != nil {
+					log.Printf("jira-poller: error looking up workflow for schedule %s: %v", target.name, err)
+					continue
+				}
+
 				// Check dedup — don't dispatch the same issue twice for the same workflow.
 				var count int
 				jp.db.QueryRow(ctx, `
 					SELECT COUNT(*) FROM workflow_runs
 					WHERE workflow_id = $1 AND trigger_ref = $2
 					AND created_at > NOW() - INTERVAL '24 hours'
-				`, target.workflowID, issue.Key).Scan(&count)
+				`, workflowID, issue.Key).Scan(&count)
 
 				if count > 0 {
 					continue // Already dispatched recently
 				}
 
-				log.Printf("jira-poller: triggering workflow %s for issue %s", target.workflowID, issue.Key)
+				log.Printf("jira-poller: triggering workflow %s for issue %s", workflowID, issue.Key)
 
 				var triggerContext map[string]interface{}
 
@@ -315,7 +342,7 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 					}
 				}
 
-				_, err := jp.workflowEngine.StartWorkflowRun(ctx, target.workflowID, "jira", issue.Key, target.teamID, triggerContext)
+				_, err = jp.workflowEngine.StartWorkflowRun(ctx, workflowID, "jira", issue.Key, target.teamID, triggerContext)
 				if err != nil {
 					log.Printf("jira-poller: error starting workflow for %s: %v", issue.Key, err)
 				}
