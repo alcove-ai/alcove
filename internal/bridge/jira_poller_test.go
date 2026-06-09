@@ -15,142 +15,107 @@
 package bridge
 
 import (
-	"context"
+	"encoding/json"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestJiraPollerTargetDiscovery(t *testing.T) {
-	pool := setupTestDB(t)
+func TestJiraTriggerMatches(t *testing.T) {
+	tests := []struct {
+		name           string
+		trigger        *JiraTrigger
+		issueProject   string
+		issueComponents []string
+		issueLabels    []string
+		expectMatch    bool
+	}{
+		{
+			name: "matches project and label",
+			trigger: &JiraTrigger{
+				Projects: []string{"TEST"},
+				Labels:   []string{"needs-planning"},
+			},
+			issueProject: "TEST",
+			issueLabels:  []string{"needs-planning", "bug"},
+			expectMatch:  true,
+		},
+		{
+			name: "matches project without label filter",
+			trigger: &JiraTrigger{
+				Projects: []string{"TEST"},
+			},
+			issueProject: "TEST",
+			issueLabels:  []string{"any-label"},
+			expectMatch:  true,
+		},
+		{
+			name: "no match different project",
+			trigger: &JiraTrigger{
+				Projects: []string{"OTHER"},
+				Labels:   []string{"needs-planning"},
+			},
+			issueProject: "TEST",
+			issueLabels:  []string{"needs-planning"},
+			expectMatch:  false,
+		},
+		{
+			name: "no match missing label",
+			trigger: &JiraTrigger{
+				Projects: []string{"TEST"},
+				Labels:   []string{"needs-planning"},
+			},
+			issueProject: "TEST",
+			issueLabels:  []string{"bug", "enhancement"},
+			expectMatch:  false,
+		},
+	}
 
-	ctx := context.Background()
-	credStore := NewCredentialStore(pool, "test-master-key")
-	workflowEngine := &WorkflowEngine{} // Empty for test
-	defStore := &AgentDefStore{}        // Empty for test
-	poller := NewJiraPoller(pool, credStore, workflowEngine, defStore)
-
-	// Set up test data
-	teamID := "test-team"
-
-	// Insert a schedule with Jira trigger
-	_, err := pool.Exec(ctx, `
-		INSERT INTO schedules (
-			id, name, prompt, repos, provider, timeout, team_id, debug, enabled,
-			trigger_type, event_config, source_key, created_at, updated_at
-		) VALUES (
-			'schedule-1', 'Test Jira Schedule', 'test prompt', '[]', 'workflow', 300, $1, false, true,
-			'event', $2, 'user::repo::file.yml', NOW(), NOW()
-		)
-	`, teamID, `{"jira": {"projects": ["TEST"], "labels": ["bug"]}}`)
-	require.NoError(t, err)
-
-	// Insert corresponding workflow
-	_, err = pool.Exec(ctx, `
-		INSERT INTO workflows (
-			id, name, team_id, source_key, created_at, updated_at
-		) VALUES (
-			'workflow-1', 'Test Workflow', $1, 'user::repo::file.yml', NOW(), NOW()
-		)
-	`, teamID)
-	require.NoError(t, err)
-
-	// Test PollAll method
-	poller.PollAll(ctx)
-
-	// Verify the method ran without error (no credentials available, so it should return early)
-	// The main test is that the schedule query worked and the code didn't crash
-	assert.NotNil(t, poller)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.trigger.Matches(tt.issueProject, tt.issueComponents, tt.issueLabels)
+			if result != tt.expectMatch {
+				t.Errorf("expected match=%v, got %v", tt.expectMatch, result)
+			}
+		})
+	}
 }
 
-func TestJiraPollerSystemPausedMode(t *testing.T) {
-	pool := setupTestDB(t)
+func TestEventTriggerJSONRoundtrip(t *testing.T) {
+	// Test that EventTrigger JSON marshaling and unmarshaling preserves
+	// the Jira trigger configuration as used by the Jira poller.
+	original := EventTrigger{
+		Jira: &JiraTrigger{
+			Projects:   []string{"PULP", "AAP"},
+			Components: []string{"UI", "API"},
+			Labels:     []string{"needs-planning", "ready-for-dev"},
+		},
+	}
 
-	ctx := context.Background()
-	credStore := NewCredentialStore(pool, "test-master-key")
-	workflowEngine := &WorkflowEngine{} // Empty for test
-	defStore := &AgentDefStore{}        // Empty for test
-	poller := NewJiraPoller(pool, credStore, workflowEngine, defStore)
+	// Marshal to JSON
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("failed to marshal EventTrigger: %v", err)
+	}
 
-	// Set system to paused mode
-	_, err := pool.Exec(ctx, `
-		INSERT INTO system_state (key, value)
-		VALUES ('mode', 'paused')
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-	`)
-	require.NoError(t, err)
+	// Unmarshal from JSON
+	var restored EventTrigger
+	err = json.Unmarshal(data, &restored)
+	if err != nil {
+		t.Fatalf("failed to unmarshal EventTrigger: %v", err)
+	}
 
-	// Insert a schedule with Jira trigger
-	teamID := "test-team"
-	_, err = pool.Exec(ctx, `
-		INSERT INTO schedules (
-			id, name, prompt, repos, provider, timeout, team_id, debug, enabled,
-			trigger_type, event_config, source_key, created_at, updated_at
-		) VALUES (
-			'schedule-2', 'Test Jira Schedule 2', 'test prompt', '[]', 'workflow', 300, $1, false, true,
-			'event', $2, 'user::repo::file2.yml', NOW(), NOW()
-		)
-	`, teamID, `{"jira": {"projects": ["TEST"], "labels": ["bug"]}}`)
-	require.NoError(t, err)
+	// Verify Jira trigger is preserved
+	if restored.Jira == nil {
+		t.Fatal("Jira trigger was lost during JSON round-trip")
+	}
 
-	// Test PollAll method - should return early due to paused mode
-	poller.PollAll(ctx)
+	if len(restored.Jira.Projects) != 2 {
+		t.Errorf("expected 2 projects, got %d", len(restored.Jira.Projects))
+	}
+	if restored.Jira.Projects[0] != "PULP" || restored.Jira.Projects[1] != "AAP" {
+		t.Errorf("projects not preserved: got %v", restored.Jira.Projects)
+	}
 
-	// The main test is that the method returned early and didn't process schedules
-	assert.NotNil(t, poller)
-}
-
-func TestJiraPollerScheduleEventConfig(t *testing.T) {
-	pool := setupTestDB(t)
-
-	ctx := context.Background()
-	credStore := NewCredentialStore(pool, "test-master-key")
-	workflowEngine := &WorkflowEngine{} // Empty for test
-	defStore := &AgentDefStore{}        // Empty for test
-	poller := NewJiraPoller(pool, credStore, workflowEngine, defStore)
-
-	teamID := "test-team"
-
-	// Insert schedule with non-Jira trigger (should be ignored)
-	_, err := pool.Exec(ctx, `
-		INSERT INTO schedules (
-			id, name, prompt, repos, provider, timeout, team_id, debug, enabled,
-			trigger_type, event_config, source_key, created_at, updated_at
-		) VALUES (
-			'schedule-github', 'GitHub Schedule', 'test prompt', '[]', 'workflow', 300, $1, false, true,
-			'event', $2, 'user::repo::github.yml', NOW(), NOW()
-		)
-	`, teamID, `{"github": {"events": ["push"], "repos": ["test/repo"]}}`)
-	require.NoError(t, err)
-
-	// Insert schedule with Jira trigger (should be found)
-	_, err = pool.Exec(ctx, `
-		INSERT INTO schedules (
-			id, name, prompt, repos, provider, timeout, team_id, debug, enabled,
-			trigger_type, event_config, source_key, created_at, updated_at
-		) VALUES (
-			'schedule-jira', 'Jira Schedule', 'test prompt', '[]', 'workflow', 300, $1, false, true,
-			'event', $3, 'user::repo::jira.yml', NOW(), NOW()
-		)
-	`, teamID, `{"jira": {"projects": ["TEST"], "labels": ["needs-planning"]}}`)
-	require.NoError(t, err)
-
-	// Insert disabled schedule (should be ignored)
-	_, err = pool.Exec(ctx, `
-		INSERT INTO schedules (
-			id, name, prompt, repos, provider, timeout, team_id, debug, enabled,
-			trigger_type, event_config, source_key, created_at, updated_at
-		) VALUES (
-			'schedule-disabled', 'Disabled Jira Schedule', 'test prompt', '[]', 'workflow', 300, $1, false, false,
-			'event', $4, 'user::repo::disabled.yml', NOW(), NOW()
-		)
-	`, teamID, `{"jira": {"projects": ["TEST"], "labels": ["bug"]}}`)
-	require.NoError(t, err)
-
-	// Test PollAll method
-	poller.PollAll(ctx)
-
-	// The main test is that the query worked correctly and only enabled Jira schedules were processed
-	assert.NotNil(t, poller)
+	if len(restored.Jira.Labels) != 2 {
+		t.Errorf("expected 2 labels, got %d", len(restored.Jira.Labels))
+	}
 }

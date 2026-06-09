@@ -100,20 +100,19 @@ func (gp *GitLabPoller) Start(ctx context.Context) {
 // gitlabPollTarget holds the information needed to match and dispatch a GitLab-
 // triggered workflow or schedule.
 type gitlabPollTarget struct {
-	workflowID  string // For workflows
-	scheduleID  string // For schedules
-	teamID      string
-	trigger     *GitLabTrigger
-	isWorkflow  bool // true = workflow, false = schedule
-	prompt      string
-	repos       []string // For schedules
-	provider    string
-	timeout     int
-	debug       bool
-	sourceKey   string
+	scheduleID string // For schedules
+	teamID     string
+	trigger    *GitLabTrigger
+	isWorkflow bool // true = workflow, false = schedule
+	prompt     string
+	repos      []string // For schedules
+	provider   string
+	timeout    int
+	debug      bool
+	sourceKey  string
 }
 
-// PollAll queries both workflows and schedules with GitLab triggers and polls GitLab
+// PollAll queries schedules with GitLab triggers and polls GitLab
 // for matching recently-updated projects.
 func (gp *GitLabPoller) PollAll(ctx context.Context) {
 	// Check system mode — skip polling when paused.
@@ -123,16 +122,16 @@ func (gp *GitLabPoller) PollAll(ctx context.Context) {
 		return
 	}
 
-	// Query schedules with GitLab triggers (including workflow-type schedules)
-	scheduleTargets := gp.queryScheduleTargets(ctx)
+	// Query schedules with GitLab triggers (includes workflow-type schedules)
+	allTargets := gp.queryScheduleTargets(ctx)
 
-	if len(scheduleTargets) == 0 {
+	if len(allTargets) == 0 {
 		return
 	}
 
 	// Group by team to minimize credential lookups.
 	teamTargets := make(map[string][]gitlabPollTarget)
-	for _, t := range scheduleTargets {
+	for _, t := range allTargets {
 		teamTargets[t.teamID] = append(teamTargets[t.teamID], t)
 	}
 
@@ -143,7 +142,8 @@ func (gp *GitLabPoller) PollAll(ctx context.Context) {
 	gp.lastPollTime = time.Now()
 }
 
-// queryScheduleTargets queries all schedules with GitLab triggers, including workflow-type schedules.
+
+// queryScheduleTargets queries all schedules with GitLab triggers.
 func (gp *GitLabPoller) queryScheduleTargets(ctx context.Context) []gitlabPollTarget {
 	rows, err := gp.db.Query(ctx, `
 		SELECT id, name, prompt, repos, provider, timeout, team_id, debug, event_config, COALESCE(source_key, '')
@@ -178,6 +178,7 @@ func (gp *GitLabPoller) queryScheduleTargets(ctx context.Context) []gitlabPollTa
 			continue
 		}
 		if trigger.GitLab == nil {
+			log.Printf("gitlab-poller: schedule %s has no gitlab trigger config", name)
 			continue // Should not happen due to query filter, but be safe
 		}
 
@@ -198,27 +199,21 @@ func (gp *GitLabPoller) queryScheduleTargets(ctx context.Context) []gitlabPollTa
 			}
 		}
 
-		target := gitlabPollTarget{
-			teamID:    teamID,
-			trigger:   trigger.GitLab,
-			prompt:    prompt,
-			repos:     repos,
-			provider:  provider,
-			timeout:   timeout,
-			debug:     debug,
-			sourceKey: sourceKey,
-		}
+		// Determine if this is a workflow-type schedule
+		isWorkflow := (provider == "workflow")
 
-		// Check if this is a workflow-type schedule
-		if provider == "workflow" && sourceKey != "" {
-			target.isWorkflow = true
-			// workflowID will be resolved at dispatch time using sourceKey
-		} else {
-			target.isWorkflow = false
-			target.scheduleID = schedID
-		}
-
-		targets = append(targets, target)
+		targets = append(targets, gitlabPollTarget{
+			scheduleID: schedID,
+			teamID:     teamID,
+			trigger:    trigger.GitLab,
+			isWorkflow: isWorkflow,
+			prompt:     prompt,
+			repos:      repos,
+			provider:   provider,
+			timeout:    timeout,
+			debug:      debug,
+			sourceKey:  sourceKey,
+		})
 	}
 
 	return targets
@@ -414,10 +409,9 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 				continue
 			}
 
-			// Resolve target ID for deduplication and dispatch
-			var targetID, workflowID string
+			// For workflow-type schedules, look up the workflow ID once
+			var workflowID string
 			if target.isWorkflow {
-				// Resolve workflow ID from source key
 				err := gp.db.QueryRow(ctx,
 					`SELECT id FROM workflows WHERE source_key = $1 AND team_id = $2`,
 					target.sourceKey, target.teamID,
@@ -426,9 +420,6 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 					log.Printf("gitlab-poller: error looking up workflow for schedule with source_key %s: %v", target.sourceKey, err)
 					continue
 				}
-				targetID = workflowID
-			} else {
-				targetID = target.scheduleID
 			}
 
 			// Deduplicate within this poll cycle
@@ -457,6 +448,13 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 
 			// Persistent dedup: prevent dispatching the same target for the same item across poll cycles.
 			if itemNumber != "" {
+				var targetID string
+				if target.isWorkflow {
+					targetID = workflowID
+				} else {
+					targetID = target.scheduleID
+				}
+
 				dedupResult, _ := gp.db.Exec(ctx,
 					`INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
 					VALUES ($1, $2, $3)
@@ -481,7 +479,7 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 			enrichedContext := gp.enricher.EnrichGitLabEventContext(ctx, token, apiHost, eventType, action, meta)
 
 			if target.isWorkflow {
-				// Dispatch workflow (workflowID already resolved above)
+				// Dispatch workflow
 				triggerRef := fmt.Sprintf("%s#%s", projectPath, itemNumber)
 				if itemNumber == "" {
 					triggerRef = projectPath
@@ -504,7 +502,7 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 					}
 				}
 
-				_, err = gp.workflowEngine.StartWorkflowRun(ctx, workflowID, "event", triggerRef, target.teamID, triggerContext)
+				_, err := gp.workflowEngine.StartWorkflowRun(ctx, workflowID, "event", triggerRef, target.teamID, triggerContext)
 				if err != nil {
 					log.Printf("gitlab-poller: error starting workflow for %s: %v", triggerRef, err)
 					continue

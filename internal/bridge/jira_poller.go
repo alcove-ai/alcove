@@ -115,14 +115,15 @@ func (jp *JiraPoller) PollAll(ctx context.Context) {
 		var name, teamID, sourceKey string
 		var eventConfigJSON []byte
 		if err := rows.Scan(&name, &eventConfigJSON, &teamID, &sourceKey); err != nil {
+			log.Printf("jira-poller: error scanning schedule: %v", err)
 			continue
 		}
 
 		var trigger EventTrigger
 		if err := json.Unmarshal(eventConfigJSON, &trigger); err != nil {
+			log.Printf("jira-poller: error unmarshaling event_config for %s: %v", name, err)
 			continue
 		}
-
 		if trigger.Jira == nil {
 			log.Printf("jira-poller: schedule %s has no jira trigger config", name)
 			continue
@@ -275,7 +276,7 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 
 		for _, target := range targets {
 			if target.trigger.Matches(issueProject, issueComponents, issue.Fields.Labels) {
-				// Resolve workflow ID from source key
+				// Look up the workflow ID by source_key
 				var workflowID string
 				err := jp.db.QueryRow(ctx,
 					`SELECT id FROM workflows WHERE source_key = $1 AND team_id = $2`,
