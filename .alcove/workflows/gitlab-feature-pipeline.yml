@@ -37,7 +37,7 @@ workflow:
     inputs:
       project: "{{trigger.gitlab_project}}"
       branch: "{{steps.implement.inputs.branch}}"
-      title: "Fix #{{trigger.issue_iid}}"
+      title: "feat(#{{trigger.issue_iid}}): {{trigger.issue_title}}"
       base: main
       body: |
         Closes #{{trigger.issue_iid}}

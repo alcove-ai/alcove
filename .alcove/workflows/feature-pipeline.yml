@@ -38,7 +38,7 @@ workflow:
     inputs:
       repo: alcove-ai/alcove
       branch: "{{steps.implement.inputs.branch}}"
-      title: "Fix #{{trigger.issue_number}}"
+      title: "feat(#{{trigger.issue_number}}): {{trigger.issue_title}}"
       base: main
       body: |
         Closes #{{trigger.issue_number}}

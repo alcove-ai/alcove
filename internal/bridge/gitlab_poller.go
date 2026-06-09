@@ -497,6 +497,14 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 				if itemNumber != "" {
 					if eventType == "issue" {
 						triggerContext["issue_iid"] = itemNumber
+						// Extract issue context for trigger template expansion
+						issueContext := gp.enricher.ExtractGitLabIssueContext(ctx, token, apiHost, projectPath, itemNumber)
+						if issueContext != nil {
+							// Merge issue fields into trigger context
+							for k, v := range issueContext {
+								triggerContext[k] = v
+							}
+						}
 					} else if eventType == "merge_request" {
 						triggerContext["mr_iid"] = itemNumber
 					}
