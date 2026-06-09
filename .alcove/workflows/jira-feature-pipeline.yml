@@ -33,7 +33,7 @@ workflow:
     inputs:
       repo: "{{trigger.repo}}"
       branch: "{{steps.implement.inputs.branch}}"
-      title: "{{trigger.issue_key}}: {{trigger.issue_title}}"
+      title: "feat({{trigger.issue_key}}): {{trigger.issue_title}}"
       base: main
       body: |
         JIRA: {{trigger.issue_url}}
