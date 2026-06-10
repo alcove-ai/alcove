@@ -146,7 +146,20 @@ alcove logs <session-id> --follow
 | [Problem Statement](docs/design/problem-statement.md) | Why ephemeral agents |
 | [Credential Management](docs/design/credential-management.md) | How Bridge manages credentials and passes tokens to Gate |
 | [Auth Backends](docs/design/auth-backends.md) | Authentication and authorization design |
+| [Related Projects](docs/related-projects.md) | Comparison with Gastown, Paperclip, OpenShell, and others |
 | [Changelog](docs/changelog.md) | Release history and version notes |
+
+## Related Projects
+
+See the [full comparison](docs/related-projects.md) for details. Key projects in this space:
+[Gastown](https://github.com/gastownhall/gastown),
+[Paperclip](https://github.com/paperclipai/paperclip),
+[Fullsend](https://github.com/fullsend-ai/fullsend),
+[Hummingbird Agent](https://hummingbird-project.io/docs/agentic-sdlc/),
+[OpenShell](https://github.com/NVIDIA/OpenShell),
+[devaipod](https://github.com/cgwalters/devaipod),
+[Ambient Code](https://github.com/ambient-code/platform),
+[Botminter](https://github.com/botminter/botminter).
 
 ## Contributing
 
