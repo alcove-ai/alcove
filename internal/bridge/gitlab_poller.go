@@ -488,7 +488,7 @@ func (gp *GitLabPoller) pollProject(ctx context.Context, token, apiHost, project
 				triggerContext := map[string]interface{}{
 					"event_type":       eventType,
 					"action":           action,
-					"project":          projectPath,
+					"gitlab_project":          projectPath,
 					"branch":           branch,
 					"enriched_context": enrichedContext,
 				}

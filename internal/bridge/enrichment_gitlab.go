@@ -370,7 +370,7 @@ func (e *GitLabEnricher) ExtractGitLabIssueContext(ctx context.Context, token, a
 		"issue_author":      issue.Author.Username,
 		"issue_assignees":   strings.Join(assigneeNames, ","),
 		"issue_labels":      strings.Join(issue.Labels, ","),
-		"project":           project,
+		"gitlab_project":           project,
 	}
 }
 
@@ -423,7 +423,7 @@ func (e *GitLabEnricher) ExtractGitLabMRContext(ctx context.Context, token, apiH
 		"mr_target_branch": mr.TargetBranch,
 		"mr_labels":       strings.Join(mr.Labels, ","),
 		"mr_assignees":    strings.Join(assigneeNames, ","),
-		"project":         project,
+		"gitlab_project":         project,
 	}
 }
 
