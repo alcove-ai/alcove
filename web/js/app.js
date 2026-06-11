@@ -6697,10 +6697,9 @@
                         openshiftOAuthMode = false;
                     }
 
-                        if (data.username) {
-                            localStorage.setItem('alcove_user', data.username);
-                            localStorage.setItem('alcove_is_admin', data.is_admin ? 'true' : 'false');
-                        }
+                    if (data.username) {
+                        localStorage.setItem('alcove_user', data.username);
+                        localStorage.setItem('alcove_is_admin', data.is_admin ? 'true' : 'false');
                     }
                 } else if (resp.status === 401) {
                     // Check if this is an rh-identity auth error
