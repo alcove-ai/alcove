@@ -3,6 +3,11 @@
 All notable changes to Alcove are documented here. This project uses
 [Semantic Versioning](https://semver.org/).
 
+## v0.46.0
+
+### Features
+- Add jira-update-issue bridge action with support for adding/removing labels, updating assignee, and setting priority/summary fields
+
 ## v0.45.1
 
 ### Bug Fixes
