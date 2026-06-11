@@ -3,6 +3,11 @@
 All notable changes to Alcove are documented here. This project uses
 [Semantic Versioning](https://semver.org/).
 
+## v0.46.1
+
+### Bug Fixes
+- Fix dashboard JavaScript syntax error in app.js init function
+
 ## v0.46.0
 
 ### Features
