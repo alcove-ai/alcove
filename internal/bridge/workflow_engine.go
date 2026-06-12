@@ -2132,7 +2132,7 @@ func (we *WorkflowEngine) validateCrossRepoCredentials(ctx context.Context, repo
 	// Check if the credential store has credentials for this service
 	// This validates that the user can access the target repository
 	credStore := &CredentialStore{db: we.db}
-	_, _, err = credStore.AcquireSCMTokenWithHost(ctx, service)
+	_, _, err = credStore.AcquireSCMTokenForOwner(ctx, service, owner)
 	if err != nil {
 		return fmt.Errorf("no credentials available for %s service (needed for repo %s): %w", service, repoURL, err)
 	}

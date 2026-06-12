@@ -239,11 +239,11 @@ func (cs *CredentialStore) DeleteCredential(ctx context.Context, id, teamID stri
 // GetRawCredential looks up and decrypts a credential by name, returning the
 // raw credential value without any token exchange. This is intended for
 // executable agents that need to perform their own authentication.
-func (cs *CredentialStore) GetRawCredential(ctx context.Context, credentialName string) ([]byte, error) {
+func (cs *CredentialStore) GetRawCredential(ctx context.Context, credentialName, teamID string) ([]byte, error) {
 	var encrypted []byte
 	err := cs.db.QueryRow(ctx,
-		`SELECT credential FROM provider_credentials WHERE (provider = $1 OR name = $1) AND team_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
-		credentialName).Scan(&encrypted)
+		`SELECT credential FROM provider_credentials WHERE (provider = $1 OR name = $1) AND team_id = $2 ORDER BY created_at DESC LIMIT 1`,
+		credentialName, teamID).Scan(&encrypted)
 	if err != nil {
 		return nil, fmt.Errorf("credential %q not found: %w", credentialName, err)
 	}
@@ -259,11 +259,11 @@ func (cs *CredentialStore) GetRawCredential(ctx context.Context, credentialName 
 // AcquireToken looks up the credential for the given provider name, decrypts it,
 // and returns a usable token. For API keys this is the raw key; for service
 // accounts and ADC it performs an OAuth2 token exchange.
-func (cs *CredentialStore) AcquireToken(ctx context.Context, providerName string) (*TokenResult, error) {
+func (cs *CredentialStore) AcquireToken(ctx context.Context, providerName, teamID string) (*TokenResult, error) {
 	var authType, provider string
 	var encrypted []byte
 	err := cs.db.QueryRow(ctx,
-		`SELECT auth_type, provider, credential FROM provider_credentials WHERE (provider = $1 OR name = $1) AND team_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`, providerName,
+		`SELECT auth_type, provider, credential FROM provider_credentials WHERE (provider = $1 OR name = $1) AND team_id = $2 ORDER BY created_at DESC LIMIT 1`, providerName, teamID,
 	).Scan(&authType, &provider, &encrypted)
 	if err != nil {
 		return nil, fmt.Errorf("credential for provider %q not found: %w", providerName, err)
@@ -378,43 +378,8 @@ func (cs *CredentialStore) DeleteSystemCredentialByName(ctx context.Context, nam
 	return err
 }
 
-// AcquireSCMToken looks up a stored credential for a GitHub or GitLab service.
-// Unlike LLM tokens, SCM tokens are typically PATs that don't need OAuth2 exchange.
-func (cs *CredentialStore) AcquireSCMToken(ctx context.Context, service string) (string, error) {
-	var encrypted []byte
-	err := cs.db.QueryRow(ctx,
-		`SELECT credential FROM provider_credentials WHERE provider = $1 OR name = $1 ORDER BY created_at DESC LIMIT 1`,
-		service).Scan(&encrypted)
-	if err != nil {
-		return "", fmt.Errorf("no credential found for service %q: %w", service, err)
-	}
-	raw, err := decrypt(cs.key, encrypted)
-	if err != nil {
-		return "", fmt.Errorf("decrypting credential for %q: %w", service, err)
-	}
-	return string(raw), nil
-}
-
-// AcquireSCMTokenWithHost looks up an SCM credential and returns both the
-// token and the API host. Falls back to default hosts when api_host is empty.
-func (cs *CredentialStore) AcquireSCMTokenWithHost(ctx context.Context, service string) (token string, apiHost string, err error) {
-	var encrypted []byte
-	var host string
-	err = cs.db.QueryRow(ctx,
-		`SELECT credential, COALESCE(api_host, '') FROM provider_credentials WHERE provider = $1 OR name = $1 ORDER BY created_at DESC LIMIT 1`,
-		service).Scan(&encrypted, &host)
-	if err != nil {
-		return "", "", fmt.Errorf("no credential found for service %q: %w", service, err)
-	}
-	raw, err := decrypt(cs.key, encrypted)
-	if err != nil {
-		return "", "", fmt.Errorf("decrypting credential for %q: %w", service, err)
-	}
-	return string(raw), host, nil
-}
-
-// AcquireSCMTokenForOwner looks up an SCM credential for a specific owner and returns
-// the token and API host. Falls back to AcquireSCMTokenWithHost if no owner-specific credential exists.
+// AcquireSCMTokenForOwner looks up an SCM credential for a specific team and returns
+// the token and API host.
 func (cs *CredentialStore) AcquireSCMTokenForOwner(ctx context.Context, service, teamID string) (token string, apiHost string, err error) {
 	var encrypted []byte
 	var host string
@@ -436,26 +401,31 @@ func (cs *CredentialStore) AcquireSCMTokenForOwner(ctx context.Context, service,
 // AcquireTokenBySessionID looks up the provider for a session and acquires a token.
 func (cs *CredentialStore) AcquireTokenBySessionID(ctx context.Context, sessionID string) (*TokenResult, error) {
 	var provider string
+	var teamID string
 	err := cs.db.QueryRow(ctx,
-		`SELECT provider FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&provider)
+		`SELECT provider, COALESCE(team_id::text, '') FROM sessions WHERE id = $1`, sessionID,
+	).Scan(&provider, &teamID)
 	if err != nil {
 		return nil, fmt.Errorf("session %q not found: %w", sessionID, err)
 	}
-	return cs.AcquireToken(ctx, provider)
+	if teamID == "" {
+		return cs.AcquireSystemToken(ctx, provider)
+	}
+	return cs.AcquireToken(ctx, provider, teamID)
 }
 
 // FirstAvailableProvider returns the first LLM credential (excluding system and
 // SCM credentials). Used for default provider resolution when no provider is
 // specified in a task request.
-func (cs *CredentialStore) FirstAvailableProvider(ctx context.Context) (*Credential, error) {
+func (cs *CredentialStore) FirstAvailableProvider(ctx context.Context, teamID string) (*Credential, error) {
 	var c Credential
 	err := cs.db.QueryRow(ctx,
 		`SELECT id, name, provider, auth_type, project_id, region, api_host, created_at, updated_at, COALESCE(team_id::text, '')
 		FROM provider_credentials
-		WHERE team_id IS NOT NULL
+		WHERE team_id = $1
 		AND provider NOT IN ('github', 'gitlab', 'jira', 'splunk', 'generic')
 		ORDER BY created_at ASC LIMIT 1`,
+		teamID,
 	).Scan(&c.ID, &c.Name, &c.Provider, &c.AuthType,
 		&c.ProjectID, &c.Region, &c.APIHost, &c.CreatedAt, &c.UpdatedAt, &c.TeamID)
 	if err != nil {
@@ -466,14 +436,14 @@ func (cs *CredentialStore) FirstAvailableProvider(ctx context.Context) (*Credent
 
 // LookupProviderCredential looks up credential metadata (without decrypting)
 // by provider or credential name. Returns nil if not found.
-func (cs *CredentialStore) LookupProviderCredential(ctx context.Context, providerName string) (*Credential, error) {
+func (cs *CredentialStore) LookupProviderCredential(ctx context.Context, providerName, teamID string) (*Credential, error) {
 	var c Credential
 	err := cs.db.QueryRow(ctx,
 		`SELECT id, name, provider, auth_type, project_id, region, api_host, created_at, updated_at, COALESCE(team_id::text, '')
 		FROM provider_credentials
-		WHERE (provider = $1 OR name = $1) AND team_id IS NOT NULL
+		WHERE (provider = $1 OR name = $1) AND team_id = $2
 		ORDER BY created_at DESC LIMIT 1`,
-		providerName,
+		providerName, teamID,
 	).Scan(&c.ID, &c.Name, &c.Provider, &c.AuthType,
 		&c.ProjectID, &c.Region, &c.APIHost, &c.CreatedAt, &c.UpdatedAt, &c.TeamID)
 	if err != nil {
@@ -484,13 +454,14 @@ func (cs *CredentialStore) LookupProviderCredential(ctx context.Context, provide
 
 // ListDistinctProviders returns distinct LLM providers from the credential store,
 // mapped to internal.Provider structs. Excludes system and SCM credentials.
-func (cs *CredentialStore) ListDistinctProviders(ctx context.Context) ([]Credential, error) {
+func (cs *CredentialStore) ListDistinctProviders(ctx context.Context, teamID string) ([]Credential, error) {
 	rows, err := cs.db.Query(ctx,
 		`SELECT DISTINCT ON (provider) id, name, provider, auth_type, project_id, region, api_host, created_at, updated_at, COALESCE(team_id::text, '')
 		FROM provider_credentials
-		WHERE team_id IS NOT NULL
+		WHERE team_id = $1
 		AND provider NOT IN ('github', 'gitlab', 'jira', 'splunk', 'generic')
-		ORDER BY provider, created_at DESC`)
+		ORDER BY provider, created_at DESC`,
+		teamID)
 	if err != nil {
 		return nil, fmt.Errorf("querying distinct providers: %w", err)
 	}

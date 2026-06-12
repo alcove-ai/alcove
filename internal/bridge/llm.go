@@ -202,7 +202,7 @@ func (l *BridgeLLM) completeVertex(ctx context.Context, systemPrompt, userPrompt
 		tokenResult, err = l.credStore.AcquireSystemToken(ctx, "_system_llm")
 	}
 	if tokenResult == nil {
-		tokenResult, err = l.credStore.AcquireToken(ctx, "google-vertex")
+		tokenResult, err = l.credStore.AcquireSystemToken(ctx, "google-vertex")
 	}
 	if tokenResult == nil {
 		// Fallback: try google default credentials from environment

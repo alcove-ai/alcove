@@ -898,7 +898,7 @@ func (a *API) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build provider list from credential store.
-	creds, err := a.credStore.ListDistinctProviders(r.Context())
+	creds, err := a.credStore.ListDistinctProviders(r.Context(), getActiveTeamID(r))
 	if err != nil {
 		log.Printf("warning: listing providers from credentials: %v", err)
 	}

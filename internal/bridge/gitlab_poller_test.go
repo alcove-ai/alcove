@@ -66,7 +66,7 @@ func TestGitLabPollerIssueContextEnrichment(t *testing.T) {
 		"issue_author":      "developer",
 		"issue_labels":      "ready-for-dev,enhancement",
 		"issue_id":          "789",
-		"project":           "test/repo",
+		"gitlab_project":    "test/repo",
 	}
 
 	for field, expectedValue := range expectedFields {
