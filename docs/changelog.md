@@ -3,6 +3,11 @@
 All notable changes to Alcove are documented here. This project uses
 [Semantic Versioning](https://semver.org/).
 
+## v0.46.2
+
+### Bug Fixes
+- Fix credential team scoping to ensure all credential lookups are properly scoped to team_id
+
 ## v0.46.1
 
 ### Bug Fixes
