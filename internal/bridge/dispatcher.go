@@ -149,11 +149,17 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	sessionID := uuid.New().String()
 	taskID := uuid.New().String()
 
+	// Extract team ID from variadic parameter (needed early for credential and profile resolution).
+	var activeTeamID string
+	if len(teamID) > 0 {
+		activeTeamID = teamID[0]
+	}
+
 	// Resolve provider: use explicit name or first available credential.
 	// "workflow" is a placeholder used by workflow schedule entries, not a real provider.
 	provider := req.Provider
 	if provider == "" || provider == "workflow" {
-		if firstCred, err := d.credStore.FirstAvailableProvider(ctx); err == nil {
+		if firstCred, err := d.credStore.FirstAvailableProvider(ctx, activeTeamID); err == nil {
 			provider = firstCred.Name
 		} else {
 			// Fall back to env-based defaults.
@@ -168,12 +174,6 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	timeout := req.Timeout
 	if timeout <= 0 {
 		timeout = 3600
-	}
-
-	// Extract team ID from variadic parameter (needed early for profile resolution).
-	var activeTeamID string
-	if len(teamID) > 0 {
-		activeTeamID = teamID[0]
 	}
 
 	// Default scope: empty (no external access).
@@ -305,7 +305,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 
 	// Resolve provider metadata from credential store.
 	// Look up the credential by name to get provider type and model info.
-	credMeta, _ := d.credStore.LookupProviderCredential(ctx, provider)
+	credMeta, _ := d.credStore.LookupProviderCredential(ctx, provider, activeTeamID)
 
 	model := req.Model
 	if model == "" {
@@ -324,9 +324,9 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 
 	// Acquire LLM token from credential store.
 	var llmToken, llmTokenType, llmProviderType string
-	tokenResult, err := d.credStore.AcquireToken(ctx, provider)
+	tokenResult, err := d.credStore.AcquireToken(ctx, provider, activeTeamID)
 	if err != nil && credMeta != nil && credMeta.Provider != provider {
-		tokenResult, err = d.credStore.AcquireToken(ctx, credMeta.Provider)
+		tokenResult, err = d.credStore.AcquireToken(ctx, credMeta.Provider, activeTeamID)
 	}
 	if err != nil {
 		log.Printf("warning: no credential found for provider %q: %v (falling back to env)", provider, err)
@@ -393,8 +393,8 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	if llmProviderType == "google-vertex" {
 		vertexRegion = "us-east5"
 		if err := d.db.QueryRow(ctx,
-			`SELECT COALESCE(project_id, ''), COALESCE(region, 'us-east5') FROM provider_credentials WHERE provider = $1 OR name = $1 ORDER BY created_at DESC LIMIT 1`,
-			provider).Scan(&vertexProject, &vertexRegion); err != nil {
+			`SELECT COALESCE(project_id, ''), COALESCE(region, 'us-east5') FROM provider_credentials WHERE (provider = $1 OR name = $1) AND team_id = $2 ORDER BY created_at DESC LIMIT 1`,
+			provider, activeTeamID).Scan(&vertexProject, &vertexRegion); err != nil {
 			log.Printf("warning: failed to query Vertex AI project/region for provider %s: %v", provider, err)
 		}
 	}
@@ -691,7 +691,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 		// For executable agents with direct_outbound, use raw credentials.
 		// This allows them to perform their own authentication (e.g., with service account JSON).
 		if req.Executable != nil && req.DirectOutbound {
-			rawCred, err := d.credStore.GetRawCredential(ctx, credName)
+			rawCred, err := d.credStore.GetRawCredential(ctx, credName, activeTeamID)
 			if err == nil {
 				skiffEnv[envVar] = string(rawCred)
 				continue
@@ -706,7 +706,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 		} else {
 			// For non-executable agents (Claude Code), use pre-fetched tokens as before.
 			// Try AcquireToken first (works for LLM and generic secrets).
-			tokenResult, err := d.credStore.AcquireToken(ctx, credName)
+			tokenResult, err := d.credStore.AcquireToken(ctx, credName, activeTeamID)
 			if err == nil {
 				skiffEnv[envVar] = tokenResult.Token
 				continue

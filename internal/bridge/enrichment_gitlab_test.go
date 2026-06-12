@@ -408,7 +408,7 @@ func TestExtractGitLabIssueContext(t *testing.T) {
 		"issue_state":       "closed",
 		"issue_author":      "alice",
 		"issue_labels":      "enhancement,documentation",
-		"project":           "owner/repo",
+		"gitlab_project":           "owner/repo",
 	}
 
 	for key, expectedValue := range expected {
@@ -851,7 +851,7 @@ func TestExtractGitLabMRContext(t *testing.T) {
 		"mr_target_branch": "develop",
 		"mr_labels":        "enhancement,needs-review",
 		"mr_assignees":     "maintainer,reviewer",
-		"project":          "owner/repo",
+		"gitlab_project":          "owner/repo",
 	}
 
 	for key, expectedValue := range expected {
@@ -920,7 +920,7 @@ func TestExtractGitLabIssueContextEnhanced(t *testing.T) {
 		"issue_author":      "reporter",
 		"issue_assignees":   "dev1,dev2",
 		"issue_labels":      "bug,priority-high",
-		"project":           "owner/repo",
+		"gitlab_project":           "owner/repo",
 	}
 
 	for key, expectedValue := range expected {
