@@ -39,11 +39,12 @@ alcove.conf
 .opencode/package-lock.json
 .opencode/role.md
 .opencode/roles/
-.opencode/data.db
-.opencode/data.db-wal
-.opencode/data.db-shm
+.opencode/data*.db
+.opencode/data*.db-wal
+.opencode/data*.db-shm
 !.env.example
 
 # OS
 .DS_Store
 .gocache/
+.opencode/radar.local.txt
