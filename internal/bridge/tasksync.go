@@ -207,7 +207,6 @@ func (s *AgentRepoSyncer) SyncAll(ctx context.Context) error {
 
 	// Per-team cleanup: remove definitions/profiles for repos the team no longer has configured.
 	for teamID, repos := range allTeamsWithRepos {
-		username := teamToUsername[teamID]
 		configuredURLs := make(map[string]bool)
 		for _, repo := range repos {
 			configuredURLs[repo.URL] = true
