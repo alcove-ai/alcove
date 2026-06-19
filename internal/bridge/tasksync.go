@@ -262,7 +262,7 @@ func (s *AgentRepoSyncer) SyncAll(ctx context.Context) error {
 				}
 				_ = s.repoGroupStore.DeleteRepoGroupsByRepo(ctx, sourceRepo, teamID)
 				// Also clean up schedules from this repo.
-				s.db.Exec(ctx, `DELETE FROM schedules WHERE source_key LIKE $1 AND team_id = $2`, username+"::"+sourceRepo+"::%", teamID)
+				s.db.Exec(ctx, `DELETE FROM schedules WHERE source_key LIKE $1 AND team_id = $2`, sourceRepo+"::%", teamID)
 				removedRepos[sourceRepo] = true
 			}
 		}
@@ -288,7 +288,7 @@ func (s *AgentRepoSyncer) SyncAll(ctx context.Context) error {
 		for _, repo := range urs.repos {
 			if !repo.IsEnabled() {
 				// Repo is disabled — disable all its schedules but don't remove them.
-				sourceKeyPrefix := urs.username + "::" + repo.URL + "::"
+				sourceKeyPrefix := repo.URL + "::"
 				_, _ = s.db.Exec(ctx,
 					`UPDATE schedules SET enabled = false WHERE source_key LIKE $1 || '%' AND source = 'yaml'`,
 					sourceKeyPrefix)
@@ -488,7 +488,7 @@ func (s *AgentRepoSyncer) syncRepo(ctx context.Context, repo SkillRepo, username
 				continue
 			}
 
-			sourceKey := fmt.Sprintf("%s::%s::%s", username, repo.URL, entry.Name())
+			sourceKey := fmt.Sprintf("%s::%s", repo.URL, entry.Name())
 			seenKeys[sourceKey] = true
 
 			td, err := ParseAgentDefinition(data)
@@ -609,7 +609,7 @@ func (s *AgentRepoSyncer) syncSecurityProfiles(ctx context.Context, cloneDir str
 			continue
 		}
 
-		sourceKey := fmt.Sprintf("%s::%s::security-profiles/%s", username, repo.URL, entry.Name())
+		sourceKey := fmt.Sprintf("%s::security-profiles/%s", repo.URL, entry.Name())
 		seenKeys[sourceKey] = true
 
 		profile, err := ParseSecurityProfile(data)
@@ -685,7 +685,7 @@ func (s *AgentRepoSyncer) syncPolicyRules(ctx context.Context, cloneDir string, 
 				continue
 			}
 
-			sourceKey := fmt.Sprintf("%s::%s::policy-rules/%s::%s", username, repo.URL, entry.Name(), rs.Name)
+			sourceKey := fmt.Sprintf("%s::policy-rules/%s::%s", repo.URL, entry.Name(), rs.Name)
 			seenKeys[sourceKey] = true
 
 			rulesJSON, err := json.Marshal(rs.Rules)
@@ -1057,7 +1057,7 @@ func (s *AgentRepoSyncer) syncWorkflowDefinitions(ctx context.Context, cloneDir 
 			continue
 		}
 
-		sourceKey := fmt.Sprintf("%s::%s::%s", username, repo.URL, entry.Name())
+		sourceKey := fmt.Sprintf("%s::%s", repo.URL, entry.Name())
 		seenKeys[sourceKey] = true
 
 		wd, err := ParseWorkflowDefinition(data)
@@ -1296,7 +1296,7 @@ func (s *AgentRepoSyncer) syncRepoGroups(ctx context.Context, cloneDir string, r
 			continue
 		}
 
-		sourceKey := fmt.Sprintf("%s::%s::%s", username, repo.URL, entry.Name())
+		sourceKey := fmt.Sprintf("%s::%s", repo.URL, entry.Name())
 		seenKeys[sourceKey] = true
 
 		rg, err := ParseRepoGroupDefinition(data)
