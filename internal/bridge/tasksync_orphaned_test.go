@@ -70,7 +70,7 @@ func TestOrphanedWorkflowCleanup(t *testing.T) {
 		Name:       "test-agent",
 		SourceRepo: oldRepoURL,
 		SourceFile: "test-agent.yml",
-		SourceKey:  username + "::" + oldRepoURL + "::test-agent.yml",
+		SourceKey:  oldRepoURL + "::test-agent.yml",
 		TeamID:     teamID,
 		Prompt:     "Test agent prompt",
 	}
@@ -84,7 +84,7 @@ func TestOrphanedWorkflowCleanup(t *testing.T) {
 		TeamID:     teamID,
 		Workflow:   []WorkflowStep{{ID: "step1", Agent: "test-agent"}},
 	}
-	sourceKey := username + "::" + oldRepoURL + "::test-workflow.yml"
+	sourceKey := oldRepoURL + "::test-workflow.yml"
 	require.NoError(t, workflowStore.UpsertWorkflow(ctx, workflowDef, sourceKey, "raw yaml", ""))
 
 	// Create a security profile
@@ -93,7 +93,7 @@ func TestOrphanedWorkflowCleanup(t *testing.T) {
 		Name:       "test-profile",
 		Source:     "yaml",
 		SourceRepo: oldRepoURL,
-		SourceKey:  username + "::" + oldRepoURL + "::security-profiles/test-profile.yml",
+		SourceKey:  oldRepoURL + "::security-profiles/test-profile.yml",
 		TeamID:     teamID,
 		Tools:      make(map[string]ProfileToolConfig),
 	}
@@ -207,12 +207,12 @@ func TestOrphanedCleanupDoesNotDeleteSchedulesFromOtherRepos(t *testing.T) {
 	// Create agent definitions in both repos
 	keepAgent := &AgentDefinition{
 		ID: uuid.New().String(), Name: "keep-agent", SourceRepo: keepRepoURL,
-		SourceFile: "keep-agent.yml", SourceKey: username + "::" + keepRepoURL + "::keep-agent.yml",
+		SourceFile: "keep-agent.yml", SourceKey: keepRepoURL + "::keep-agent.yml",
 		TeamID: teamID, Prompt: "Keep agent",
 	}
 	removeAgent := &AgentDefinition{
 		ID: uuid.New().String(), Name: "remove-agent", SourceRepo: removeRepoURL,
-		SourceFile: "remove-agent.yml", SourceKey: username + "::" + removeRepoURL + "::remove-agent.yml",
+		SourceFile: "remove-agent.yml", SourceKey: removeRepoURL + "::remove-agent.yml",
 		TeamID: teamID, Prompt: "Remove agent",
 	}
 	require.NoError(t, defStore.UpsertAgentDefinition(ctx, keepAgent))
@@ -222,13 +222,13 @@ func TestOrphanedCleanupDoesNotDeleteSchedulesFromOtherRepos(t *testing.T) {
 	_, err = db.Exec(ctx, `
 		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
 		VALUES ($1, 'keep-schedule', '0 0 * * *', 'test', '', '', 0, true, NOW(), $2, 'yaml', $3, 'cron')
-	`, uuid.New().String(), teamID, username+"::"+keepRepoURL+"::keep-agent.yml")
+	`, uuid.New().String(), teamID, keepRepoURL+"::keep-agent.yml")
 	require.NoError(t, err)
 
 	_, err = db.Exec(ctx, `
 		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
 		VALUES ($1, 'remove-schedule', '0 0 * * *', 'test', '', '', 0, true, NOW(), $2, 'yaml', $3, 'cron')
-	`, uuid.New().String(), teamID, username+"::"+removeRepoURL+"::remove-agent.yml")
+	`, uuid.New().String(), teamID, removeRepoURL+"::remove-agent.yml")
 	require.NoError(t, err)
 
 	// Remove one repo from configuration
@@ -245,14 +245,14 @@ func TestOrphanedCleanupDoesNotDeleteSchedulesFromOtherRepos(t *testing.T) {
 	// Verify: schedule for kept repo should still exist
 	var keepCount int
 	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE source_key = $1 AND team_id = $2`,
-		username+"::"+keepRepoURL+"::keep-agent.yml", teamID).Scan(&keepCount)
+		keepRepoURL+"::keep-agent.yml", teamID).Scan(&keepCount)
 	require.NoError(t, err)
 	assert.Equal(t, 1, keepCount, "schedule for kept repo should survive cleanup")
 
 	// Verify: schedule for removed repo should be deleted
 	var removeCount int
 	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE source_key = $1 AND team_id = $2`,
-		username+"::"+removeRepoURL+"::remove-agent.yml", teamID).Scan(&removeCount)
+		removeRepoURL+"::remove-agent.yml", teamID).Scan(&removeCount)
 	require.NoError(t, err)
 	assert.Equal(t, 0, removeCount, "schedule for removed repo should be deleted")
 }
