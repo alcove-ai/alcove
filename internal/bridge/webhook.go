@@ -85,9 +85,11 @@ func (t *GitLabTrigger) Matches(eventType, action, project, branch string, label
 }
 
 type JiraTrigger struct {
-	Projects   []string `json:"projects" yaml:"projects"`                       // JIRA project keys (e.g., "RHCLOUD", "AAP")
-	Components []string `json:"components,omitempty" yaml:"components,omitempty"` // component filters (empty = all)
-	Labels     []string `json:"labels,omitempty" yaml:"labels,omitempty"`         // label filters (empty = all)
+	Projects           []string `json:"projects" yaml:"projects"`                                                     // JIRA project keys (e.g., "RHCLOUD", "AAP")
+	Components         []string `json:"components,omitempty" yaml:"components,omitempty"`                           // component filters (empty = all)
+	Labels             []string `json:"labels,omitempty" yaml:"labels,omitempty"`                                   // label filters (empty = all)
+	RetriggerOnComment bool     `json:"retrigger_on_comment,omitempty" yaml:"retrigger_on_comment,omitempty"`       // if true, new comments change trigger_ref to allow re-dispatch
+	Users              []string `json:"users,omitempty" yaml:"users,omitempty"`                                     // allowlist for comment authors when retrigger_on_comment is true
 }
 
 // Matches checks if a JIRA issue matches this trigger config.

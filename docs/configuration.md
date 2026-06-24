@@ -848,6 +848,47 @@ trigger:
 If `users` is omitted or empty, all matching events are dispatched regardless
 of the event author.
 
+### Jira Comment-Based Re-triggering
+
+Jira triggers support comment-aware re-triggering through the `retrigger_on_comment` 
+field. When enabled, new comments on a Jira issue change the internal trigger 
+reference, allowing workflows to be re-dispatched even if they've already run 
+for the same issue within the 24-hour deduplication window.
+
+```yaml
+name: jira-planner
+prompt: |
+  Plan the implementation for this Jira issue.
+repos:
+  - url: https://github.com/org/myproject.git
+trigger:
+  jira:
+    projects: [PULP, AAP]
+    labels: [needs-planning]
+    retrigger_on_comment: true
+    users: [alice, bob]
+```
+
+**How it works**: Without `retrigger_on_comment`, the trigger reference is the 
+plain issue key (e.g., "PULP-1369"). With `retrigger_on_comment: true`, the 
+trigger reference includes the comment count (e.g., "PULP-1369:c5"). When a 
+new comment is added, the count changes, creating a new trigger reference that 
+passes the deduplication check.
+
+**The `users` field is strongly recommended** when using `retrigger_on_comment`. 
+It works as an allowlist for comment authors, matching against Jira display names 
+(case-insensitive). Only comments from listed users will trigger re-dispatch, 
+preventing automation systems, CI bots, and the workflow itself from creating 
+infinite re-triggering loops.
+
+**Warning**: If `retrigger_on_comment: true` is set without the `users` filter, 
+ANY comment (including from automation) will trigger a re-dispatch. This can 
+create runaway workflows if the workflow itself posts comments to Jira.
+
+If `retrigger_on_comment` is omitted or false, standard behavior applies: only 
+one workflow run per issue key within the 24-hour deduplication window, regardless 
+of comment activity.
+
 ### Closed Issue/PR Filtering
 
 Events for closed or merged issues and pull requests are automatically skipped.

@@ -1601,6 +1601,24 @@ If `users` is omitted or empty, all matching events are dispatched regardless of
 
 See [Configuration Reference](configuration.md#user-based-trigger-filtering) for full details.
 
+### Jira Comment-Based Re-triggering
+
+Jira triggers support an additional `retrigger_on_comment` field for comment-aware re-triggering:
+
+```yaml
+trigger:
+  jira:
+    projects: [PULP]
+    labels: [needs-planning]
+    retrigger_on_comment: true
+    users: [alice, bob]
+```
+
+- `retrigger_on_comment` (boolean, optional): When true, new comments change the trigger reference to allow re-dispatch
+- `users` (array, optional but strongly recommended): Allowlist of Jira display names for comment authors
+
+See [Configuration Reference](configuration.md#jira-comment-based-re-triggering) for full details.
+
 ---
 
 ## Agent Templates
