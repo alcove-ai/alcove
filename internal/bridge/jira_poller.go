@@ -227,7 +227,7 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 		strings.Join(projects, ","), minutesSinceLastPoll)
 
 	// Search JIRA.
-	searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&maxResults=50&fields=key,summary,status,labels,components,description,issuetype,priority,assignee,reporter,issuelinks",
+	searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&maxResults=50&fields=key,summary,status,labels,components,description,issuetype,priority,assignee,reporter,issuelinks,comment",
 		jp.baseURL, url.QueryEscape(jql))
 
 	data, err := jp.jiraRequest(ctx, token, "GET", searchURL, nil)
@@ -252,6 +252,9 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 				IssueType struct {
 					Name string `json:"name"`
 				} `json:"issuetype"`
+				Comment struct {
+					Total int `json:"total"`
+				} `json:"comment"`
 			} `json:"fields"`
 		} `json:"issues"`
 	}
@@ -276,6 +279,11 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 
 		for _, target := range targets {
 			if target.trigger.Matches(issueProject, issueComponents, issue.Fields.Labels) {
+				// Warn at startup if retrigger_on_comment is enabled without users filter
+				if target.trigger.RetriggerOnComment && len(target.trigger.Users) == 0 {
+					log.Printf("jira-poller: WARNING: schedule %s has retrigger_on_comment without users filter - all comments will trigger re-dispatch", target.name)
+				}
+
 				// Look up the workflow ID by source_key
 				var workflowID string
 				err := jp.db.QueryRow(ctx,
@@ -287,19 +295,62 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 					continue
 				}
 
+				// Construct trigger_ref based on RetriggerOnComment setting
+				var triggerRef string
+				if target.trigger.RetriggerOnComment {
+					// Check if latest commenter is in allowlist (if users filter is set)
+					shouldUsePlainKey := false
+					if len(target.trigger.Users) > 0 {
+						// Need to get latest comment author - we'll use enrichment data
+						if enrichmentCount < maxEnrichmentPerPoll {
+							latestCommenter := jp.getLatestCommenter(ctx, token, issue.Key)
+							if latestCommenter != "" {
+								// Check if latest commenter is in users allowlist
+								foundUser := false
+								for _, allowedUser := range target.trigger.Users {
+									if strings.EqualFold(latestCommenter, allowedUser) {
+										foundUser = true
+										break
+									}
+								}
+								if !foundUser {
+									log.Printf("jira-poller: latest commenter '%s' not in users allowlist for issue %s, using plain trigger_ref", latestCommenter, issue.Key)
+									shouldUsePlainKey = true
+								}
+							}
+						} else {
+							// If we can't check due to enrichment limit, fall back to plain key
+							shouldUsePlainKey = true
+						}
+					}
+
+					if shouldUsePlainKey {
+						triggerRef = issue.Key
+					} else {
+						// Use comment-aware trigger_ref
+						triggerRef = fmt.Sprintf("%s:c%d", issue.Key, issue.Fields.Comment.Total)
+					}
+				} else {
+					// Standard trigger_ref without comment count
+					triggerRef = issue.Key
+				}
+
 				// Check dedup — don't dispatch the same issue twice for the same workflow.
+				// Only count non-failed runs to allow retries after failures.
 				var count int
 				jp.db.QueryRow(ctx, `
 					SELECT COUNT(*) FROM workflow_runs
 					WHERE workflow_id = $1 AND trigger_ref = $2
 					AND created_at > NOW() - INTERVAL '24 hours'
-				`, workflowID, issue.Key).Scan(&count)
+					AND status NOT IN ('failed', 'error', 'cancelled')
+				`, workflowID, triggerRef).Scan(&count)
 
 				if count > 0 {
-					continue // Already dispatched recently
+					log.Printf("jira-poller: skipping issue %s for workflow %s - %d recent non-failed run(s) found (trigger_ref=%s)", issue.Key, workflowID, count, triggerRef)
+					continue // Already dispatched recently with non-failed status
 				}
 
-				log.Printf("jira-poller: triggering workflow %s for issue %s", workflowID, issue.Key)
+				log.Printf("jira-poller: triggering workflow %s for issue %s (trigger_ref=%s)", workflowID, issue.Key, triggerRef)
 
 				var triggerContext map[string]interface{}
 
@@ -342,7 +393,7 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 					}
 				}
 
-				_, err = jp.workflowEngine.StartWorkflowRun(ctx, workflowID, "jira", issue.Key, target.teamID, triggerContext)
+				_, err = jp.workflowEngine.StartWorkflowRun(ctx, workflowID, "jira", triggerRef, target.teamID, triggerContext)
 				if err != nil {
 					log.Printf("jira-poller: error starting workflow for %s: %v", issue.Key, err)
 				}
@@ -392,4 +443,43 @@ func (jp *JiraPoller) jiraRequest(ctx context.Context, credential, method, reqUR
 	}
 
 	return respBody, nil
+}
+
+// getLatestCommenter fetches the latest comment author for an issue.
+// Returns empty string if no comments or if there's an error.
+func (jp *JiraPoller) getLatestCommenter(ctx context.Context, token, issueKey string) string {
+	// Fetch the latest comment (maxResults=1, ordered by creation desc)
+	commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=1&orderBy=-created",
+		jp.baseURL, issueKey)
+
+	commentsData, err := jp.jiraRequest(ctx, token, "GET", commentsURL, nil)
+	if err != nil {
+		log.Printf("jira-poller: error fetching latest comment for issue %s: %v", issueKey, err)
+		return ""
+	}
+
+	var comments struct {
+		Comments []struct {
+			Author struct {
+				DisplayName  string `json:"displayName"`
+				EmailAddress string `json:"emailAddress"`
+			} `json:"author"`
+		} `json:"comments"`
+	}
+
+	if err := json.Unmarshal(commentsData, &comments); err != nil {
+		log.Printf("jira-poller: error parsing comments for issue %s: %v", issueKey, err)
+		return ""
+	}
+
+	if len(comments.Comments) == 0 {
+		return ""
+	}
+
+	// Try displayName first, fallback to emailAddress
+	author := comments.Comments[0].Author
+	if author.DisplayName != "" {
+		return author.DisplayName
+	}
+	return author.EmailAddress
 }

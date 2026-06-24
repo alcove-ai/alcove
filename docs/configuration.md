@@ -848,6 +848,35 @@ trigger:
 If `users` is omitted or empty, all matching events are dispatched regardless
 of the event author.
 
+### Jira Comment-Based Re-triggering
+
+**IMPORTANT**: This feature is ONLY available for Jira triggers, not GitHub or GitLab.
+
+The `retrigger_on_comment` field enables comment-aware re-triggering for Jira workflows. When enabled, the poller constructs a trigger_ref that includes the comment count (e.g., `PULP-1369:c5` instead of just `PULP-1369`). This allows the same issue to trigger new workflow runs when someone adds a comment, making interactive revision cycles possible.
+
+```yaml
+name: jira-milestone-planner
+prompt: |
+  You are a 7-perspective planning committee analyzing a JIRA issue.
+repos:
+  - url: https://github.com/org/myproject.git
+trigger:
+  jira:
+    projects: [PULP]
+    labels: [needs-planning]
+    retrigger_on_comment: true
+    users: [bmbouter, decko]  # CRITICAL: prevent automation loops
+```
+
+**Security Warning**: Always set the `users` field when using `retrigger_on_comment: true`. Without user filtering, ANY comment (including from automation rules, CI integrations, or the workflow itself) will trigger a new run, potentially creating infinite loops. The `users` allowlist should contain only trusted human users who should be able to restart the workflow by commenting.
+
+**How it works**:
+- With `retrigger_on_comment: false` (default): trigger_ref = `PULP-1369`
+- With `retrigger_on_comment: true`: trigger_ref = `PULP-1369:c5` (where 5 is the comment count)
+- When someone adds a comment, the count changes → new trigger_ref → bypasses dedup → new workflow run
+
+**User filtering**: When `users` is specified, only comments from users whose Jira `displayName` (case-insensitive) matches the allowlist will trigger re-dispatch. Comments from other users (including automation accounts) will fall back to the plain issue key, preserving the normal 24-hour dedup behavior.
+
 ### Closed Issue/PR Filtering
 
 Events for closed or merged issues and pull requests are automatically skipped.

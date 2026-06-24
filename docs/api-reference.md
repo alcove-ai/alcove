@@ -1601,6 +1601,25 @@ If `users` is omitted or empty, all matching events are dispatched regardless of
 
 See [Configuration Reference](configuration.md#user-based-trigger-filtering) for full details.
 
+### Jira Comment-Based Re-triggering
+
+**JIRA-specific feature**: The `retrigger_on_comment` field (boolean) and `users` field (string array) provide comment-aware re-triggering for Jira workflows.
+
+```yaml
+trigger:
+  jira:
+    projects: [PULP]
+    labels: [needs-planning]
+    retrigger_on_comment: true
+    users: [bmbouter, decko]
+```
+
+When `retrigger_on_comment: true`, the trigger_ref includes the comment count, allowing the same issue to trigger new workflow runs when comments are added. The `users` field filters which commenters can trigger re-dispatch.
+
+**Warning**: Always set `users` when using `retrigger_on_comment` to prevent automation loops.
+
+See [Configuration Reference](configuration.md#jira-comment-based-re-triggering) for full details.
+
 ---
 
 ## Agent Templates

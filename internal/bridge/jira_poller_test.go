@@ -119,3 +119,54 @@ func TestEventTriggerJSONRoundtrip(t *testing.T) {
 		t.Errorf("expected 2 labels, got %d", len(restored.Jira.Labels))
 	}
 }
+
+func TestEventTriggerJSONRoundtripWithNewFields(t *testing.T) {
+	// Test that EventTrigger JSON marshaling and unmarshaling preserves
+	// the new RetriggerOnComment and Users fields.
+	original := EventTrigger{
+		Jira: &JiraTrigger{
+			Projects:           []string{"PULP", "AAP"},
+			Components:         []string{"UI", "API"},
+			Labels:             []string{"needs-planning", "ready-for-dev"},
+			RetriggerOnComment: true,
+			Users:              []string{"bmbouter", "decko"},
+		},
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("failed to marshal EventTrigger: %v", err)
+	}
+
+	// Unmarshal from JSON
+	var restored EventTrigger
+	err = json.Unmarshal(data, &restored)
+	if err != nil {
+		t.Fatalf("failed to unmarshal EventTrigger: %v", err)
+	}
+
+	// Verify Jira trigger is preserved
+	if restored.Jira == nil {
+		t.Fatal("Jira trigger was lost during JSON round-trip")
+	}
+
+	if len(restored.Jira.Projects) != 2 {
+		t.Errorf("expected 2 projects, got %d", len(restored.Jira.Projects))
+	}
+
+	if len(restored.Jira.Labels) != 2 {
+		t.Errorf("expected 2 labels, got %d", len(restored.Jira.Labels))
+	}
+
+	if !restored.Jira.RetriggerOnComment {
+		t.Error("RetriggerOnComment field was not preserved")
+	}
+
+	if len(restored.Jira.Users) != 2 {
+		t.Errorf("expected 2 users, got %d", len(restored.Jira.Users))
+	}
+	if restored.Jira.Users[0] != "bmbouter" || restored.Jira.Users[1] != "decko" {
+		t.Errorf("users not preserved: got %v", restored.Jira.Users)
+	}
+}
