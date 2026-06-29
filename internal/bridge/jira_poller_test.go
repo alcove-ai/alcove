@@ -1,24 +1,11 @@
-// Copyright 2026 Brian Bouterse
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package bridge
 
 import (
+	"context"
 	"encoding/json"
-	"strings"
 	"testing"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestJiraTriggerMatches(t *testing.T) {
@@ -122,226 +109,190 @@ func TestEventTriggerJSONRoundtrip(t *testing.T) {
 	}
 }
 
-// TestJiraDedupQueryExcludesFailedAndCancelled verifies that the dedup query
-// correctly filters out failed and cancelled workflow runs, allowing retries
-// after failures.
-func TestJiraDedupQueryExcludesFailedAndCancelled(t *testing.T) {
-	// This test verifies the SQL query pattern used in the dedup logic.
-	// The expected dedup query should exclude failed and cancelled statuses
-	expectedQuery := `
-			SELECT COUNT(*) FROM workflow_runs
-			WHERE workflow_id = $1 AND trigger_ref = $2
-			AND created_at > NOW() - INTERVAL '24 hours'
-			AND status NOT IN ('failed', 'cancelled')
-		`
-
-	// Normalize whitespace for comparison
-	normalizedQuery := strings.Join(strings.Fields(expectedQuery), " ")
-
-	// Verify query contains the status filter
-	if !strings.Contains(normalizedQuery, "status NOT IN ('failed', 'cancelled')") {
-		t.Errorf("dedup query should exclude failed and cancelled statuses")
+func TestJiraPollerDedupWithFailedRuns(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
 	}
 
-	// Verify it has the time window
-	if !strings.Contains(normalizedQuery, "created_at > NOW() - INTERVAL '24 hours'") {
-		t.Errorf("dedup query should include 24-hour time window")
-	}
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
 
-	// Verify basic structure
-	expectedParts := []string{
-		"SELECT COUNT(*)",
-		"FROM workflow_runs",
-		"WHERE workflow_id = $1",
-		"AND trigger_ref = $2",
-	}
-
-	for _, part := range expectedParts {
-		if !strings.Contains(normalizedQuery, part) {
-			t.Errorf("dedup query should contain %q", part)
-		}
-	}
-
-	tests := []struct {
-		name           string
-		existingStatus []string
-		shouldBlock    bool
-	}{
-		{
-			name:           "failed run should not block retry",
-			existingStatus: []string{"failed"},
-			shouldBlock:    false,
-		},
-		{
-			name:           "cancelled run should not block retry",
-			existingStatus: []string{"cancelled"},
-			shouldBlock:    false,
-		},
-		{
-			name:           "running run should block",
-			existingStatus: []string{"running"},
-			shouldBlock:    true,
-		},
-		{
-			name:           "completed run should block",
-			existingStatus: []string{"completed"},
-			shouldBlock:    true,
-		},
-		{
-			name:           "pending run should block",
-			existingStatus: []string{"pending"},
-			shouldBlock:    true,
-		},
-		{
-			name:           "awaiting_approval run should block",
-			existingStatus: []string{"awaiting_approval"},
-			shouldBlock:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Test that our expected query logic matches the test case
-			blockedByExistingQuery := false
-			for _, status := range tt.existingStatus {
-				if status != "failed" && status != "cancelled" {
-					blockedByExistingQuery = true
-					break
-				}
-			}
-
-			if blockedByExistingQuery != tt.shouldBlock {
-				t.Errorf("%s: query logic mismatch", tt.name)
-			}
-		})
-	}
-}
-
-// TestJiraPollerStatusFilter tests the dedup logic with different run statuses.
-func TestJiraPollerStatusFilter(t *testing.T) {
-	// Test workflow and issue
+	// Setup test data
+	teamID := "test-team-id"
 	workflowID := "test-workflow-id"
-	issueKey := "TEST-123"
+	triggerRef := "TEST-123"
 
+	// Create team, workflow, and test workflow runs with different statuses
+	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
+
+	// Test scenarios
 	tests := []struct {
-		name         string
-		existingRuns []workflowRunRecord
-		shouldBlock  bool
-		description  string
+		name          string
+		runStatus     string
+		expectBlocked bool
 	}{
 		{
-			name: "failed run does not block",
-			existingRuns: []workflowRunRecord{
-				{
-					WorkflowID: workflowID,
-					TriggerRef: issueKey,
-					Status:     "failed",
-					CreatedAt:  time.Now().Add(-1 * time.Hour),
-				},
-			},
-			shouldBlock: false,
-			description: "Failed runs should not block retries",
+			name:          "failed run should not block",
+			runStatus:     "failed",
+			expectBlocked: false,
 		},
 		{
-			name: "cancelled run does not block",
-			existingRuns: []workflowRunRecord{
-				{
-					WorkflowID: workflowID,
-					TriggerRef: issueKey,
-					Status:     "cancelled",
-					CreatedAt:  time.Now().Add(-1 * time.Hour),
-				},
-			},
-			shouldBlock: false,
-			description: "Cancelled runs should not block retries",
+			name:          "cancelled run should not block",
+			runStatus:     "cancelled",
+			expectBlocked: false,
 		},
 		{
-			name: "running run blocks",
-			existingRuns: []workflowRunRecord{
-				{
-					WorkflowID: workflowID,
-					TriggerRef: issueKey,
-					Status:     "running",
-					CreatedAt:  time.Now().Add(-1 * time.Hour),
-				},
-			},
-			shouldBlock: true,
-			description: "Running runs should block new dispatches",
+			name:          "running run should block",
+			runStatus:     "running",
+			expectBlocked: true,
 		},
 		{
-			name: "completed run blocks",
-			existingRuns: []workflowRunRecord{
-				{
-					WorkflowID: workflowID,
-					TriggerRef: issueKey,
-					Status:     "completed",
-					CreatedAt:  time.Now().Add(-1 * time.Hour),
-				},
-			},
-			shouldBlock: true,
-			description: "Completed runs should block new dispatches",
+			name:          "completed run should block",
+			runStatus:     "completed",
+			expectBlocked: true,
+		},
+		{
+			name:          "pending run should block",
+			runStatus:     "pending",
+			expectBlocked: true,
+		},
+		{
+			name:          "awaiting_approval run should block",
+			runStatus:     "awaiting_approval",
+			expectBlocked: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a mock database that we can control
-			mockDB := &mockWorkflowDB{
-				workflowRuns: make(map[string][]workflowRunRecord),
+			// Clean up any existing runs
+			_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
+			if err != nil {
+				t.Fatalf("failed to clean up test data: %v", err)
 			}
 
-			// Setup mock data
-			key := workflowID + ":" + issueKey
-			mockDB.workflowRuns[key] = tt.existingRuns
+			// Insert a workflow run with the specified status
+			_, err = db.Exec(ctx, `
+				INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
+				VALUES ($1, $2, $3, 'jira', $4, $5, NOW(), '{}')
+			`, "test-run-id", workflowID, triggerRef, tt.runStatus, teamID)
+			if err != nil {
+				t.Fatalf("failed to insert test workflow run: %v", err)
+			}
 
-			// Test the dedup logic
-			count := mockDB.countNonBlockingRuns(workflowID, issueKey)
-			actualBlocks := count > 0
+			// Run the dedup query (same as in jira_poller.go)
+			var count int
+			err = db.QueryRow(ctx, `
+				SELECT COUNT(*) FROM workflow_runs
+				WHERE workflow_id = $1 AND trigger_ref = $2
+				AND created_at > NOW() - INTERVAL '24 hours'
+				AND status NOT IN ('failed', 'cancelled')
+			`, workflowID, triggerRef).Scan(&count)
+			if err != nil {
+				t.Fatalf("failed to run dedup query: %v", err)
+			}
 
-			if actualBlocks != tt.shouldBlock {
-				t.Errorf("%s: expected shouldBlock=%v, got %v (count=%d)",
-					tt.description, tt.shouldBlock, actualBlocks, count)
+			isBlocked := count > 0
+			if isBlocked != tt.expectBlocked {
+				t.Errorf("status %s: expected blocked=%v, got blocked=%v (count=%d)", tt.runStatus, tt.expectBlocked, isBlocked, count)
 			}
 		})
 	}
 }
 
-// Mock structures for testing the dedup logic
-type workflowRunRecord struct {
-	WorkflowID string
-	TriggerRef string
-	Status     string
-	CreatedAt  time.Time
-}
-
-type mockWorkflowDB struct {
-	workflowRuns map[string][]workflowRunRecord
-}
-
-// countNonBlockingRuns simulates the dedup query logic with the status filter
-func (m *mockWorkflowDB) countNonBlockingRuns(workflowID, triggerRef string) int {
-	key := workflowID + ":" + triggerRef
-	runs, exists := m.workflowRuns[key]
-	if !exists {
-		return 0
+func TestJiraPollerDedupExpiredRuns(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
 	}
 
-	count := 0
-	cutoff := time.Now().Add(-24 * time.Hour)
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
 
-	for _, run := range runs {
-		// Simulate the SQL query logic:
-		// WHERE workflow_id = $1 AND trigger_ref = $2
-		// AND created_at > NOW() - INTERVAL '24 hours'
-		// AND status NOT IN ('failed', 'cancelled')
-		if run.WorkflowID == workflowID &&
-			run.TriggerRef == triggerRef &&
-			run.CreatedAt.After(cutoff) &&
-			run.Status != "failed" &&
-			run.Status != "cancelled" {
-			count++
+	// Setup test data
+	teamID := "test-team-id"
+	workflowID := "test-workflow-id"
+	triggerRef := "TEST-456"
+
+	// Create team, workflow, and test workflow runs with different statuses
+	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
+
+	// Insert a completed run from 25 hours ago (should be expired)
+	_, err := db.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
+		VALUES ($1, $2, $3, 'jira', 'completed', $4, NOW() - INTERVAL '25 hours', '{}')
+	`, "test-expired-run", workflowID, triggerRef, teamID)
+	if err != nil {
+		t.Fatalf("failed to insert expired workflow run: %v", err)
+	}
+
+	// Run the dedup query
+	var count int
+	err = db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM workflow_runs
+		WHERE workflow_id = $1 AND trigger_ref = $2
+		AND created_at > NOW() - INTERVAL '24 hours'
+		AND status NOT IN ('failed', 'cancelled')
+	`, workflowID, triggerRef).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to run dedup query: %v", err)
+	}
+
+	// Expired runs should not block (count should be 0)
+	if count != 0 {
+		t.Errorf("expected expired run to not block (count=0), got count=%d", count)
+	}
+}
+
+// getTestDB returns a test database connection.
+// This assumes a test database is available (e.g., via Docker or CI).
+func getTestDB(t *testing.T) *pgxpool.Pool {
+	// Try common test database URLs
+	testDBURLs := []string{
+		"postgres://postgres:postgres@localhost:5432/alcove_test?sslmode=disable",
+		"postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable",
+	}
+
+	var db *pgxpool.Pool
+	var err error
+
+	for _, dbURL := range testDBURLs {
+		db, err = pgxpool.New(context.Background(), dbURL)
+		if err == nil {
+			// Test the connection
+			if pingErr := db.Ping(context.Background()); pingErr == nil {
+				return db
+			}
+			db.Close()
 		}
 	}
 
-	return count
+	t.Skipf("no test database available, tried: %v (last error: %v)", testDBURLs, err)
+	return nil
+}
+
+// setupDedupTestData creates the necessary test data for dedup tests
+func setupDedupTestData(t *testing.T, ctx context.Context, db *pgxpool.Pool, teamID, workflowID, triggerRef string) {
+	// Create team if it doesn't exist
+	_, err := db.Exec(ctx, `
+		INSERT INTO teams (id, name, description, created_at, updated_at)
+		VALUES ($1, 'Test Team', 'Test team for unit tests', NOW(), NOW())
+		ON CONFLICT (id) DO NOTHING
+	`, teamID)
+	if err != nil {
+		t.Fatalf("failed to create test team: %v", err)
+	}
+
+	// Create workflow if it doesn't exist
+	_, err = db.Exec(ctx, `
+		INSERT INTO workflows (id, name, team_id, source_key, definition, created_at, updated_at)
+		VALUES ($1, 'Test Workflow', $2, 'test/workflow', '{}', NOW(), NOW())
+		ON CONFLICT (id) DO NOTHING
+	`, workflowID, teamID)
+	if err != nil {
+		t.Fatalf("failed to create test workflow: %v", err)
+	}
 }
