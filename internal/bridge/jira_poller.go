@@ -293,9 +293,11 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 					SELECT COUNT(*) FROM workflow_runs
 					WHERE workflow_id = $1 AND trigger_ref = $2
 					AND created_at > NOW() - INTERVAL '24 hours'
+					AND status NOT IN ('failed', 'cancelled')
 				`, workflowID, issue.Key).Scan(&count)
 
 				if count > 0 {
+					log.Printf("jira-poller: skipping %s — already dispatched recently (blocking run count: %d)", issue.Key, count)
 					continue // Already dispatched recently
 				}
 
