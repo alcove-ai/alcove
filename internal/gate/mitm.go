@@ -499,6 +499,11 @@ func (m *MITMHandler) identifyServiceFromHost(hostname string) string {
 		}
 	}
 
+	// Check custom GitLab host before hardcoded patterns
+	if m.config.GitLabHost != "" && hostname == m.config.GitLabHost {
+		return "gitlab"
+	}
+
 	switch {
 	case hostname == "api.github.com" || hostname == "github.com" || strings.HasSuffix(hostname, ".github.com"):
 		return "github"

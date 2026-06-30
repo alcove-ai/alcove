@@ -179,6 +179,28 @@ upstream URLs via HTTP_PROXY; Gate transparently intercepts the encrypted tunnel
 5. For unknown domains, Gate either passes through (if allowed by scope) or
    blocks the tunnel.
 
+### 2.2 Custom SCM Host Configuration
+
+For self-hosted GitLab, Jira, or other SCM instances, Gate supports custom host configuration through credential `api_host` fields.
+
+**GitLab example:**
+If the GitLab credential has `api_host: https://gitlab.cee.redhat.com`, the dispatcher automatically sets:
+- `GITLAB_API_URL=https://gitlab.cee.redhat.com/api/v4` (for agents)
+- `GATE_GITLAB_HOST=gitlab.cee.redhat.com` (for MITM interception)
+
+Gate's MITM handler then:
+1. Adds `gitlab.cee.redhat.com` to the list of intercepted domains
+2. Uses custom host matching in `identifyServiceFromHost()` to map the domain to the "gitlab" service
+3. Injects GitLab credentials for requests to the custom host
+
+This enables teams to use different GitLab instances (all environment variables are team-scoped) while maintaining the same agent definitions and scope configurations.
+
+**Implementation details:**
+- Uses existing `stripURLToHost()` helper to extract hostnames from full URLs
+- Only activates when `api_host` is non-empty on the credential
+- Custom host checking happens before hardcoded domain patterns
+- Supports any self-hosted SCM instance that follows standard API patterns
+
 **Ephemeral CA trust chain:**
 
 - Bridge generates an ephemeral CA key pair (RSA 2048) per session at

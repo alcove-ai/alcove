@@ -204,6 +204,37 @@ Multi-user credential association, RBAC, and audit logging are Phase 2+.
 - `cmd/bridge/main.go` — add provider_credentials table to schema
 - `go.mod` — add `golang.org/x/oauth2` dependency
 
+## SCM API Host Configuration
+
+**Date: 2026-06-30 (Issue #714 implementation)**
+
+SCM credentials can specify custom API host URLs via the `api_host` field. This enables Alcove to work with self-hosted GitLab, Jira, or other SCM instances.
+
+### GitLab API Host Plumbing
+
+When a GitLab credential has a non-empty `api_host` field, the dispatcher automatically configures both Skiff and Gate environments:
+
+- **`GITLAB_API_URL`** (Skiff) — Set to `<api_host>/api/v4` for tools that need the full API endpoint URL
+- **`GATE_GITLAB_HOST`** (Gate) — Set to the hostname portion of `api_host` for MITM proxy interception
+
+For example, if the GitLab credential has `api_host: https://gitlab.cee.redhat.com`, the dispatcher will set:
+```
+GITLAB_API_URL=https://gitlab.cee.redhat.com/api/v4
+GATE_GITLAB_HOST=gitlab.cee.redhat.com
+```
+
+This mirrors the existing pattern for Jira credentials and ensures that:
+1. Agents receive the correct API endpoint URL via `$GITLAB_API_URL`
+2. Gate's MITM handler intercepts requests to the custom GitLab host and injects credentials
+3. Different teams can use different GitLab instances (all environment variables are team-scoped)
+
+### Implementation Notes
+
+- Uses the existing `stripURLToHost()` helper to extract hostname from full URLs
+- Only activates when `api_host` is non-empty on the credential — existing setups are unaffected
+- Gate's `identifyServiceFromHost()` function checks custom GitLab host before hardcoded patterns
+- All environment variables are team-scoped (derived from team credential at dispatch time)
+
 ## Gate Vertex API Translation
 
 Gate does more than simple header injection for Vertex AI. When the provider is

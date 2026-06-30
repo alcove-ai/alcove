@@ -12,6 +12,8 @@ prompt: |
 
   Use the GitLab API (via $GITLAB_API_URL with $GITLAB_TOKEN).
 
+  **IMPORTANT**: If $GITLAB_API_URL is not set, use https://gitlab.cee.redhat.com/api/v4 as the default.
+
   App-interface fork project ID: 79823
   App-interface upstream project ID: 13582
   Deploy file: data/services/pulp/deploy-alcove.yml
@@ -38,6 +40,16 @@ prompt: |
       -H "Content-Type: application/json" \
       -d '{"source_branch": "alcove-<version>", "target_branch": "master", "target_project_id": 13582, "title": "Upgrade Alcove to <version>"}'
 
+  ## Failure Handling
+
+  **CRITICAL**: If any GitLab API call returns an HTML page, a redirect, or a non-2xx status code,
+  you MUST exit with code 1. NEVER write outputs claiming success if the MR was not created and verified.
+
+  If authentication fails or the GitLab API is unreachable, analyze the response:
+  - If you receive HTML content instead of JSON, this indicates SSO/authentication issues
+  - If you receive redirects, this indicates wrong API endpoint
+  - Exit immediately with a clear error message rather than fabricating success outputs
+
   ## Wait for MR Pipeline and /lgtm
 
   Poll the pipeline every 60 seconds. Once it passes, post /lgtm:
@@ -54,9 +66,18 @@ prompt: |
   Poll the MR state every 60 seconds until state is "merged".
   If closed or pipeline fails after retries, report error and stop.
 
-  CRITICAL — YOUR VERY LAST ACTION must be writing outputs:
+  ## Verification Before Success
+
+  Before writing success outputs, verify the MR was actually created and processed:
+  1. GET the MR by IID to confirm it exists and check its state
+  2. Only proceed with success outputs if the MR is confirmed to exist and be in expected state
+
+  ## Success Outputs
+
+  ONLY after successful verification of MR creation and processing, write outputs:
     echo '{"version": "<version>", "deployed": true, "mr_merged": true}' > /tmp/alcove-outputs.json
-  Do NOT skip this step.
+
+  If verification fails or any step above fails, exit with code 1 and do NOT write success outputs.
 
 timeout: 3600
 enforcement_mode: monitor
