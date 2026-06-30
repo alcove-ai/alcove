@@ -457,6 +457,84 @@ func TestMITMHandler_CredentialInjection_ToolConfig(t *testing.T) {
 	}
 }
 
+// TestMITMHandler_IdentifyServiceFromHost_CustomGitLab tests the identifyServiceFromHost
+// function with custom GitLab host configuration.
+func TestMITMHandler_IdentifyServiceFromHost_CustomGitLab(t *testing.T) {
+	certPEM, keyPEM := mustGenerateTestCA(t)
+	cfg := &Config{
+		Scope: internal.Scope{
+			Services: map[string]internal.ServiceScope{
+				"gitlab": {Repos: []string{"*"}, Operations: []string{"*"}},
+			},
+		},
+		Credentials: map[string]string{"gitlab": "glpat_test"},
+		ToolConfigs: map[string]ToolConfig{},
+		GitLabHost:  "gitlab.cee.redhat.com",
+	}
+	m, err := NewMITMHandler(certPEM, keyPEM, cfg)
+	if err != nil {
+		t.Fatalf("creating MITM handler: %v", err)
+	}
+
+	tests := []struct {
+		hostname string
+		expected string
+	}{
+		{"gitlab.cee.redhat.com", "gitlab"},
+		{"gitlab.com", "gitlab"},
+		{"ci.gitlab.com", "gitlab"},
+		{"api.github.com", "github"},
+		{"unknown.example.com", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.hostname, func(t *testing.T) {
+			got := m.identifyServiceFromHost(tt.hostname)
+			if got != tt.expected {
+				t.Errorf("identifyServiceFromHost(%q) = %q, want %q", tt.hostname, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestMITMHandler_IdentifyServiceFromHost_NoCustomGitLab tests that without
+// custom GitLab host configuration, custom hosts are not identified as gitlab.
+func TestMITMHandler_IdentifyServiceFromHost_NoCustomGitLab(t *testing.T) {
+	certPEM, keyPEM := mustGenerateTestCA(t)
+	cfg := &Config{
+		Scope: internal.Scope{
+			Services: map[string]internal.ServiceScope{
+				"gitlab": {Repos: []string{"*"}, Operations: []string{"*"}},
+			},
+		},
+		Credentials: map[string]string{"gitlab": "glpat_test"},
+		ToolConfigs: map[string]ToolConfig{},
+		// No GitLabHost set
+	}
+	m, err := NewMITMHandler(certPEM, keyPEM, cfg)
+	if err != nil {
+		t.Fatalf("creating MITM handler: %v", err)
+	}
+
+	tests := []struct {
+		hostname string
+		expected string
+	}{
+		{"gitlab.cee.redhat.com", ""}, // Should not be identified without GitLabHost set
+		{"gitlab.com", "gitlab"},       // Standard gitlab.com should still work
+		{"ci.gitlab.com", "gitlab"},    // *.gitlab.com should still work
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.hostname, func(t *testing.T) {
+			got := m.identifyServiceFromHost(tt.hostname)
+			if got != tt.expected {
+				t.Errorf("identifyServiceFromHost(%q) = %q, want %q", tt.hostname, got, tt.expected)
+			}
+		})
+	}
+}
+
 // TestDecodePEMFromBase64 verifies base64 decoding of PEM data.
 func TestDecodePEMFromBase64(t *testing.T) {
 	certPEM, _, err := GenerateTestCA()

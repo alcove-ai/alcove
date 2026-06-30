@@ -602,6 +602,10 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	if token, ok := scmDummyTokens["gitlab"]; ok {
 		skiffEnv["GITLAB_TOKEN"] = token
 		skiffEnv["GITLAB_PERSONAL_ACCESS_TOKEN"] = token
+		if host, ok := scmAPIHosts["gitlab"]; ok {
+			skiffEnv["GITLAB_API_URL"] = strings.TrimRight(host, "/") + "/api/v4"
+			gateEnv["GATE_GITLAB_HOST"] = stripURLToHost(host)
+		}
 	}
 	if token, ok := scmDummyTokens["jira"]; ok {
 		skiffEnv["JIRA_TOKEN"] = token
