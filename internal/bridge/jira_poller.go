@@ -29,6 +29,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Failure cap constants for preventing infinite retry loops
+const (
+	// maxConsecutiveFailures is the maximum number of consecutive failed workflow runs
+	// allowed for the same trigger_ref within the failure cap window.
+	// This could be made configurable per-team or per-workflow in the future.
+	maxConsecutiveFailures = 3
+
+	// failureCapWindow defines how far back to look for failed runs when checking
+	// the consecutive failure count.
+	failureCapWindow = 30 * time.Minute
+)
+
 // JiraPoller polls JIRA for recently updated issues and triggers workflows
 // whose definitions include a jira trigger that matches.
 type JiraPoller struct {
@@ -287,6 +299,48 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 					continue
 				}
 
+				// Check failure cap — prevent infinite retries for workflows that always fail
+				var failureCount int
+				err = jp.db.QueryRow(ctx, `
+					SELECT COUNT(*) FROM workflow_runs
+					WHERE workflow_id = $1 AND trigger_ref = $2
+					AND created_at > NOW() - $3::interval
+					AND status = 'failed'
+				`, workflowID, issue.Key, failureCapWindow).Scan(&failureCount)
+				if err != nil {
+					log.Printf("jira-poller: error checking failure count for %s: %v", issue.Key, err)
+					continue
+				}
+
+				if failureCount >= maxConsecutiveFailures {
+					// Find the trigger label to remove (first matching label from the issue)
+					var triggerLabel string
+					for _, label := range issue.Fields.Labels {
+						for _, triggerLbl := range target.trigger.Labels {
+							if label == triggerLbl {
+								triggerLabel = label
+								break
+							}
+						}
+						if triggerLabel != "" {
+							break
+						}
+					}
+
+					log.Printf("jira-poller: skipping %s — %d failures in 30m window (max: %d), removing label %q",
+						issue.Key, failureCount, maxConsecutiveFailures, triggerLabel)
+
+					// Post Jira comment explaining why retries stopped (best-effort)
+					jp.postFailureCapComment(ctx, token, issue.Key, failureCount, triggerLabel)
+
+					// Remove trigger label (best-effort)
+					if triggerLabel != "" {
+						jp.removeTriggerLabel(ctx, token, issue.Key, triggerLabel)
+					}
+
+					continue // Skip dispatch
+				}
+
 				// Check dedup — don't dispatch the same issue twice for the same workflow.
 				var count int
 				jp.db.QueryRow(ctx, `
@@ -394,4 +448,67 @@ func (jp *JiraPoller) jiraRequest(ctx context.Context, credential, method, reqUR
 	}
 
 	return respBody, nil
+}
+
+// postFailureCapComment posts a comment to a Jira issue explaining why workflow retries
+// have been suspended due to too many consecutive failures.
+func (jp *JiraPoller) postFailureCapComment(ctx context.Context, token, issueKey string, failureCount int, triggerLabel string) {
+	commentText := fmt.Sprintf("⚠️ Alcove: workflow retries suspended for this ticket — failed %d times in the last 30 minutes. To retry, re-add the `%s` label after 30 minutes.",
+		failureCount, triggerLabel)
+
+	commentReq := map[string]interface{}{
+		"body": map[string]interface{}{
+			"type":    "doc",
+			"version": 1,
+			"content": []interface{}{
+				map[string]interface{}{
+					"type": "paragraph",
+					"content": []interface{}{
+						map[string]interface{}{
+							"type": "text",
+							"text": commentText,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	commentJSON, err := json.Marshal(commentReq)
+	if err != nil {
+		log.Printf("jira-poller: error marshaling failure cap comment for %s: %v", issueKey, err)
+		return
+	}
+
+	commentURL := fmt.Sprintf("%s/rest/api/3/issue/%s/comment", jp.baseURL, issueKey)
+	_, err = jp.jiraRequest(ctx, token, "POST", commentURL, commentJSON)
+	if err != nil {
+		log.Printf("jira-poller: error posting failure cap comment to %s: %v", issueKey, err)
+	}
+}
+
+// removeTriggerLabel removes a trigger label from a Jira issue to prevent further
+// automatic retries after the failure cap has been reached.
+func (jp *JiraPoller) removeTriggerLabel(ctx context.Context, token, issueKey, label string) {
+	updateReq := map[string]interface{}{
+		"update": map[string]interface{}{
+			"labels": []map[string]interface{}{
+				{
+					"remove": label,
+				},
+			},
+		},
+	}
+
+	updateJSON, err := json.Marshal(updateReq)
+	if err != nil {
+		log.Printf("jira-poller: error marshaling label removal request for %s: %v", issueKey, err)
+		return
+	}
+
+	updateURL := fmt.Sprintf("%s/rest/api/3/issue/%s", jp.baseURL, issueKey)
+	_, err = jp.jiraRequest(ctx, token, "PUT", updateURL, updateJSON)
+	if err != nil {
+		log.Printf("jira-poller: error removing label %s from %s: %v", label, issueKey, err)
+	}
 }
