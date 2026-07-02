@@ -47,3 +47,4 @@ alcove.conf
 # OS
 .DS_Store
 .gocache/
+.go-cache/

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -294,5 +295,226 @@ func setupDedupTestData(t *testing.T, ctx context.Context, db *pgxpool.Pool, tea
 	`, workflowID, teamID)
 	if err != nil {
 		t.Fatalf("failed to create test workflow: %v", err)
+	}
+}
+
+func TestJiraPollerFailureCapBlocks(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
+
+	// Setup test data
+	teamID := "test-team-failure-cap"
+	workflowID := "test-workflow-failure-cap"
+	triggerRef := "TEST-789"
+
+	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
+
+	// Clean up any existing runs
+	_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
+	if err != nil {
+		t.Fatalf("failed to clean up test data: %v", err)
+	}
+
+	// Insert 3 failed runs within the 30-minute window
+	for i := 0; i < 3; i++ {
+		_, err = db.Exec(ctx, `
+			INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
+			VALUES ($1, $2, $3, 'jira', 'failed', $4, NOW() - INTERVAL '%d minutes', '{}')
+		`, fmt.Sprintf("test-run-%d", i), workflowID, triggerRef, teamID, i*5) // 0, 5, 10 minutes ago
+		if err != nil {
+			t.Fatalf("failed to insert test workflow run %d: %v", i, err)
+		}
+	}
+
+	// Run the failure cap query
+	var failureCount int
+	err = db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM workflow_runs
+		WHERE workflow_id = $1 AND trigger_ref = $2
+		AND created_at > NOW() - INTERVAL '30 minutes'
+		AND status = 'failed'
+	`, workflowID, triggerRef).Scan(&failureCount)
+	if err != nil {
+		t.Fatalf("failed to run failure cap query: %v", err)
+	}
+
+	// Should find 3 failures and block dispatch
+	if failureCount != 3 {
+		t.Errorf("expected 3 failures, got %d", failureCount)
+	}
+
+	if failureCount < maxConsecutiveFailures {
+		t.Errorf("expected failure count (%d) to be >= maxConsecutiveFailures (%d)", failureCount, maxConsecutiveFailures)
+	}
+}
+
+func TestJiraPollerFailureCapAllowsRetry(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
+
+	// Setup test data
+	teamID := "test-team-retry-allowed"
+	workflowID := "test-workflow-retry-allowed"
+	triggerRef := "TEST-456"
+
+	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
+
+	// Clean up any existing runs
+	_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
+	if err != nil {
+		t.Fatalf("failed to clean up test data: %v", err)
+	}
+
+	// Insert only 2 failed runs within the window (below the cap)
+	for i := 0; i < 2; i++ {
+		_, err = db.Exec(ctx, `
+			INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
+			VALUES ($1, $2, $3, 'jira', 'failed', $4, NOW() - INTERVAL '%d minutes', '{}')
+		`, fmt.Sprintf("test-run-%d", i), workflowID, triggerRef, teamID, i*5) // 0, 5 minutes ago
+		if err != nil {
+			t.Fatalf("failed to insert test workflow run %d: %v", i, err)
+		}
+	}
+
+	// Run the failure cap query
+	var failureCount int
+	err = db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM workflow_runs
+		WHERE workflow_id = $1 AND trigger_ref = $2
+		AND created_at > NOW() - INTERVAL '30 minutes'
+		AND status = 'failed'
+	`, workflowID, triggerRef).Scan(&failureCount)
+	if err != nil {
+		t.Fatalf("failed to run failure cap query: %v", err)
+	}
+
+	// Should find 2 failures and allow dispatch
+	if failureCount != 2 {
+		t.Errorf("expected 2 failures, got %d", failureCount)
+	}
+
+	if failureCount >= maxConsecutiveFailures {
+		t.Errorf("expected failure count (%d) to be < maxConsecutiveFailures (%d)", failureCount, maxConsecutiveFailures)
+	}
+}
+
+func TestJiraPollerFailureCapCooldownExpired(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
+
+	// Setup test data
+	teamID := "test-team-cooldown"
+	workflowID := "test-workflow-cooldown"
+	triggerRef := "TEST-999"
+
+	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
+
+	// Clean up any existing runs
+	_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
+	if err != nil {
+		t.Fatalf("failed to clean up test data: %v", err)
+	}
+
+	// Insert 3 failed runs from 35 minutes ago (outside the 30-minute window)
+	for i := 0; i < 3; i++ {
+		_, err = db.Exec(ctx, `
+			INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
+			VALUES ($1, $2, $3, 'jira', 'failed', $4, NOW() - INTERVAL '%d minutes', '{}')
+		`, fmt.Sprintf("test-run-expired-%d", i), workflowID, triggerRef, teamID, 35+i*5) // 35, 40, 45 minutes ago
+		if err != nil {
+			t.Fatalf("failed to insert expired test workflow run %d: %v", i, err)
+		}
+	}
+
+	// Run the failure cap query
+	var failureCount int
+	err = db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM workflow_runs
+		WHERE workflow_id = $1 AND trigger_ref = $2
+		AND created_at > NOW() - INTERVAL '30 minutes'
+		AND status = 'failed'
+	`, workflowID, triggerRef).Scan(&failureCount)
+	if err != nil {
+		t.Fatalf("failed to run failure cap query: %v", err)
+	}
+
+	// Should find 0 failures within the window and allow dispatch
+	if failureCount != 0 {
+		t.Errorf("expected 0 failures within the window, got %d", failureCount)
+	}
+}
+
+func TestJiraPollerFailureCapIgnoresOtherStatuses(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
+
+	// Setup test data
+	teamID := "test-team-mixed-status"
+	workflowID := "test-workflow-mixed-status"
+	triggerRef := "TEST-555"
+
+	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
+
+	// Clean up any existing runs
+	_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
+	if err != nil {
+		t.Fatalf("failed to clean up test data: %v", err)
+	}
+
+	// Insert 2 failed runs and 1 completed run within the window
+	statuses := []string{"failed", "failed", "completed"}
+	for i, status := range statuses {
+		_, err = db.Exec(ctx, `
+			INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
+			VALUES ($1, $2, $3, 'jira', $4, $5, NOW() - INTERVAL '%d minutes', '{}')
+		`, fmt.Sprintf("test-run-mixed-%d", i), workflowID, triggerRef, status, teamID, i*5)
+		if err != nil {
+			t.Fatalf("failed to insert mixed status test workflow run %d: %v", i, err)
+		}
+	}
+
+	// Run the failure cap query (should only count failed runs)
+	var failureCount int
+	err = db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM workflow_runs
+		WHERE workflow_id = $1 AND trigger_ref = $2
+		AND created_at > NOW() - INTERVAL '30 minutes'
+		AND status = 'failed'
+	`, workflowID, triggerRef).Scan(&failureCount)
+	if err != nil {
+		t.Fatalf("failed to run failure cap query: %v", err)
+	}
+
+	// Should find only 2 failed runs (ignoring the completed one) and allow dispatch
+	if failureCount != 2 {
+		t.Errorf("expected 2 failed runs, got %d", failureCount)
+	}
+
+	if failureCount >= maxConsecutiveFailures {
+		t.Errorf("expected failure count (%d) to be < maxConsecutiveFailures (%d)", failureCount, maxConsecutiveFailures)
 	}
 }
