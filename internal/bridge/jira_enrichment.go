@@ -176,6 +176,13 @@ func (jp *JiraPoller) enrichJiraIssueContext(ctx context.Context, token, issueKe
 	if commentsText != "" {
 		additionalContext["issue_comments"] = commentsText
 	}
+	// Add latest comment metadata to additional context
+	if latestCommentID != "" {
+		additionalContext["latest_comment_id"] = latestCommentID
+	}
+	if latestCommentAuthorID != "" {
+		additionalContext["latest_comment_author_id"] = latestCommentAuthorID
+	}
 
 	// Add latest comment metadata to additional context
 	if latestCommentID != "" {
@@ -208,7 +215,7 @@ func (jp *JiraPoller) enrichJiraIssueContext(ctx context.Context, token, issueKe
 }
 
 // enrichJiraComments fetches and formats comments for the issue.
-// Returns the formatted comments text and latest comment metadata.
+// Returns the formatted comment text and metadata for the latest comment.
 func (jp *JiraPoller) enrichJiraComments(ctx context.Context, token, issueKey string, sb *strings.Builder) (string, string, string) {
 	commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=%d&orderBy=-created",
 		jp.baseURL, issueKey, maxCommentsNum)
@@ -250,6 +257,7 @@ func (jp *JiraPoller) enrichJiraComments(ctx context.Context, token, issueKey st
 		sb.WriteString(fmt.Sprintf("**%s** (%s):\n%s\n\n", c.Author.DisplayName, dateStr, comment))
 	}
 
+	// Return formatted text and latest comment metadata (comments are ordered by -created, so [0] is latest)
 	return strings.Join(commentsText, "\n"), latestCommentID, latestCommentAuthorID
 }
 

@@ -109,7 +109,10 @@ func TestEventTriggerJSONRoundtrip(t *testing.T) {
 	}
 }
 
-func TestJiraPollerDedupWithFailedRuns(t *testing.T) {
+// TestJiraPoller_ActiveRunBlocksDispatch tests the new behavior where only
+// active workflow runs (running/pending/awaiting_approval) block new dispatch,
+// regardless of comment ID.
+func TestJiraPoller_ActiveRunBlocksDispatch(t *testing.T) {
 	// Skip test if no database URL is configured
 	if testing.Short() {
 		t.Skip("skipping database integration test in short mode")
@@ -167,7 +170,7 @@ func TestJiraPollerDedupWithFailedRuns(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clean up any existing runs
+			// Clean up any existing runs and dedup entries
 			_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
 			if err != nil {
 				t.Fatalf("failed to clean up test data: %v", err)
@@ -182,7 +185,7 @@ func TestJiraPollerDedupWithFailedRuns(t *testing.T) {
 				t.Fatalf("failed to insert test workflow run: %v", err)
 			}
 
-			// Run the new concurrent-run guard query (not the old 24h query)
+			// Run the new concurrent-run guard query (checking only active statuses)
 			var count int
 			err = db.QueryRow(ctx, `
 				SELECT COUNT(*) FROM workflow_runs
@@ -201,7 +204,9 @@ func TestJiraPollerDedupWithFailedRuns(t *testing.T) {
 	}
 }
 
-func TestJiraPollerDedupExpiredRuns(t *testing.T) {
+// TestJiraPoller_CompletedRunAllowsNewDispatch tests that completed/failed/cancelled
+// runs do not block new dispatch for new comments (key behavioral change from old code).
+func TestJiraPoller_CompletedRunAllowsNewDispatch(t *testing.T) {
 	// Skip test if no database URL is configured
 	if testing.Short() {
 		t.Skip("skipping database integration test in short mode")
@@ -214,287 +219,52 @@ func TestJiraPollerDedupExpiredRuns(t *testing.T) {
 	// Setup test data
 	teamID := "test-team-id"
 	workflowID := "test-workflow-id"
-	triggerRef := "TEST-456"
+	triggerRef := "TEST-124"
 
-	// Create team, workflow, and test workflow runs with different statuses
+	// Create team, workflow
 	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
 
-	// Insert a completed run from 25 hours ago (should be expired)
-	_, err := db.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
-		VALUES ($1, $2, $3, 'jira', 'completed', $4, NOW() - INTERVAL '25 hours', '{}')
-	`, "test-expired-run", workflowID, triggerRef, teamID)
-	if err != nil {
-		t.Fatalf("failed to insert expired workflow run: %v", err)
-	}
-
-	// Run the dedup query
-	var count int
-	err = db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM workflow_runs
-		WHERE workflow_id = $1 AND trigger_ref = $2
-		AND created_at > NOW() - INTERVAL '24 hours'
-		AND status NOT IN ('failed', 'cancelled')
-	`, workflowID, triggerRef).Scan(&count)
-	if err != nil {
-		t.Fatalf("failed to run dedup query: %v", err)
-	}
-
-	// Expired runs should not block (count should be 0)
-	if count != 0 {
-		t.Errorf("expected expired run to not block (count=0), got count=%d", count)
-	}
-}
-
-// TestJiraPoller_BotCommentDoesNotTrigger verifies that issues whose latest
-// comment was authored by the bot's accountId are skipped during dispatch.
-func TestJiraPoller_BotCommentDoesNotTrigger(t *testing.T) {
-	// Mock latest comment metadata from a bot
-	latestCommentAuthorID := "bot-account-123"
-	botAccountID := "bot-account-123"
-
-	// Test bot detection logic - this will be implemented in the poller
-	shouldSkip := latestCommentAuthorID == botAccountID
-	if !shouldSkip {
-		t.Errorf("expected bot comment to trigger skip, but shouldSkip=%v", shouldSkip)
-	}
-}
-
-// TestJiraPoller_UserCommentTriggers verifies that issues whose latest comment
-// was authored by a non-bot user should proceed to dispatch.
-func TestJiraPoller_UserCommentTriggers(t *testing.T) {
-	// Mock latest comment metadata from a user
-	latestCommentAuthorID := "user-account-456"
-	botAccountID := "bot-account-123"
-
-	// Test bot detection logic - this will be implemented in the poller
-	shouldSkip := latestCommentAuthorID == botAccountID
-	if shouldSkip {
-		t.Errorf("expected user comment to NOT trigger skip, but shouldSkip=%v", shouldSkip)
-	}
-}
-
-// TestJiraPoller_DedupKeyIncludesCommentID verifies that dedup keys include
-// comment IDs and handle the no-comment case correctly.
-func TestJiraPoller_DedupKeyIncludesCommentID(t *testing.T) {
+	// Test scenarios for completed runs that should NOT block
 	tests := []struct {
-		name              string
-		issueKey          string
-		latestCommentID   string
-		expectedDedupKey  string
+		name          string
+		runStatus     string
+		expectBlocked bool
 	}{
 		{
-			name:             "issue with comment",
-			issueKey:         "TEST-123",
-			latestCommentID:  "10042",
-			expectedDedupKey: "TEST-123:10042",
+			name:          "completed run should not block new dispatch",
+			runStatus:     "completed",
+			expectBlocked: false,
 		},
 		{
-			name:             "issue without comments",
-			issueKey:         "TEST-456",
-			latestCommentID:  "",
-			expectedDedupKey: "TEST-456:no-comment",
+			name:          "failed run should not block new dispatch",
+			runStatus:     "failed",
+			expectBlocked: false,
+		},
+		{
+			name:          "cancelled run should not block new dispatch",
+			runStatus:     "cancelled",
+			expectBlocked: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build dedup key using the same logic as implementation
-			var dedupKey string
-			if tt.latestCommentID != "" {
-				dedupKey = tt.issueKey + ":" + tt.latestCommentID
-			} else {
-				dedupKey = tt.issueKey + ":no-comment"
-			}
-
-			if dedupKey != tt.expectedDedupKey {
-				t.Errorf("expected dedup key %q, got %q", tt.expectedDedupKey, dedupKey)
-			}
-		})
-	}
-}
-
-// TestJiraPoller_SameCommentNotDispatchedTwice verifies that inserting a dedup
-// entry for the same issue+comment blocks subsequent dispatch attempts.
-func TestJiraPoller_SameCommentNotDispatchedTwice(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping database integration test in short mode")
-	}
-
-	ctx := context.Background()
-	db := getTestDB(t)
-	defer db.Close()
-
-	// Setup test data
-	teamID := "test-team-id"
-	workflowID := "test-workflow-id"
-	setupDedupTestData(t, ctx, db, teamID, workflowID, "dummy")
-
-	issueKey := "TEST-123"
-	commentID := "10042"
-	projectKey := "TEST"
-	dedupKey := issueKey + ":" + commentID
-
-	// Insert initial dedup entry
-	result1, err := db.Exec(ctx,
-		`INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
-		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-		projectKey, dedupKey, workflowID)
-	if err != nil {
-		t.Fatalf("failed to insert dedup entry: %v", err)
-	}
-
-	// First insert should succeed
-	if result1.RowsAffected() == 0 {
-		t.Error("expected first dedup insert to succeed")
-	}
-
-	// Attempt second insert for same issue+comment
-	result2, err := db.Exec(ctx,
-		`INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
-		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-		projectKey, dedupKey, workflowID)
-	if err != nil {
-		t.Fatalf("failed to insert duplicate dedup entry: %v", err)
-	}
-
-	// Second insert should be blocked (0 rows affected)
-	if result2.RowsAffected() != 0 {
-		t.Error("expected second dedup insert to be blocked")
-	}
-}
-
-// TestJiraPoller_NewCommentDispatchesAgain verifies that a new comment on the
-// same issue creates a new dispatch opportunity (core conversation pattern).
-func TestJiraPoller_NewCommentDispatchesAgain(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping database integration test in short mode")
-	}
-
-	ctx := context.Background()
-	db := getTestDB(t)
-	defer db.Close()
-
-	// Setup test data
-	teamID := "test-team-id"
-	workflowID := "test-workflow-id"
-	setupDedupTestData(t, ctx, db, teamID, workflowID, "dummy")
-
-	issueKey := "TEST-123"
-	commentID1 := "10042"
-	commentID2 := "10043"
-	projectKey := "TEST"
-
-	// Insert dedup entry for first comment
-	dedupKey1 := issueKey + ":" + commentID1
-	result1, err := db.Exec(ctx,
-		`INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
-		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-		projectKey, dedupKey1, workflowID)
-	if err != nil {
-		t.Fatalf("failed to insert first dedup entry: %v", err)
-	}
-
-	if result1.RowsAffected() == 0 {
-		t.Error("expected first dedup insert to succeed")
-	}
-
-	// Insert dedup entry for new comment on same issue
-	dedupKey2 := issueKey + ":" + commentID2
-	result2, err := db.Exec(ctx,
-		`INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
-		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-		projectKey, dedupKey2, workflowID)
-	if err != nil {
-		t.Fatalf("failed to insert second dedup entry: %v", err)
-	}
-
-	// Second comment should allow dispatch (different dedup key)
-	if result2.RowsAffected() == 0 {
-		t.Error("expected second comment to allow dispatch")
-	}
-}
-
-// TestJiraPoller_ActiveRunBlocksDispatch verifies that a running/pending workflow
-// blocks new dispatch regardless of comment ID (prevents concurrent runs).
-func TestJiraPoller_ActiveRunBlocksDispatch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping database integration test in short mode")
-	}
-
-	ctx := context.Background()
-	db := getTestDB(t)
-	defer db.Close()
-
-	// Setup test data
-	teamID := "test-team-id"
-	workflowID := "test-workflow-id"
-	triggerRef := "TEST-123"
-	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
-
-	// Insert an active workflow run
-	_, err := db.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
-		VALUES ($1, $2, $3, 'jira', 'running', $4, NOW(), '{}')
-	`, "test-active-run", workflowID, triggerRef, teamID)
-	if err != nil {
-		t.Fatalf("failed to insert active workflow run: %v", err)
-	}
-
-	// Check concurrent-run guard (replaces old 24h query)
-	var count int
-	err = db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM workflow_runs
-		WHERE workflow_id = $1 AND trigger_ref = $2
-		AND status IN ('running', 'pending', 'awaiting_approval')
-	`, workflowID, triggerRef).Scan(&count)
-	if err != nil {
-		t.Fatalf("failed to run concurrent-run guard query: %v", err)
-	}
-
-	// Active runs should block dispatch
-	if count == 0 {
-		t.Error("expected active run to block dispatch (count > 0)")
-	}
-}
-
-// TestJiraPoller_CompletedRunAllowsNewDispatch verifies that completed/failed/cancelled
-// runs do not block new dispatch for new comments (key behavioral change).
-func TestJiraPoller_CompletedRunAllowsNewDispatch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping database integration test in short mode")
-	}
-
-	ctx := context.Background()
-	db := getTestDB(t)
-	defer db.Close()
-
-	// Setup test data
-	teamID := "test-team-id"
-	workflowID := "test-workflow-id"
-	triggerRef := "TEST-123"
-	setupDedupTestData(t, ctx, db, teamID, workflowID, triggerRef)
-
-	statuses := []string{"completed", "failed", "cancelled"}
-
-	for _, status := range statuses {
-		t.Run(status, func(t *testing.T) {
 			// Clean up any existing runs
 			_, err := db.Exec(ctx, "DELETE FROM workflow_runs WHERE workflow_id = $1 AND trigger_ref = $2", workflowID, triggerRef)
 			if err != nil {
 				t.Fatalf("failed to clean up test data: %v", err)
 			}
 
-			// Insert a completed/failed/cancelled workflow run
+			// Insert a workflow run with the specified status
 			_, err = db.Exec(ctx, `
 				INSERT INTO workflow_runs (id, workflow_id, trigger_ref, trigger_type, status, team_id, created_at, step_outputs)
 				VALUES ($1, $2, $3, 'jira', $4, $5, NOW(), '{}')
-			`, "test-completed-run", workflowID, triggerRef, status, teamID)
+			`, "test-run-id", workflowID, triggerRef, tt.runStatus, teamID)
 			if err != nil {
-				t.Fatalf("failed to insert completed workflow run: %v", err)
+				t.Fatalf("failed to insert test workflow run: %v", err)
 			}
 
-			// Check concurrent-run guard
+			// Run the new concurrent-run guard query (checking only active statuses)
 			var count int
 			err = db.QueryRow(ctx, `
 				SELECT COUNT(*) FROM workflow_runs
@@ -505,11 +275,215 @@ func TestJiraPoller_CompletedRunAllowsNewDispatch(t *testing.T) {
 				t.Fatalf("failed to run concurrent-run guard query: %v", err)
 			}
 
-			// Completed/failed/cancelled runs should NOT block dispatch
-			if count != 0 {
-				t.Errorf("expected %s run to NOT block dispatch (count = 0), got count=%d", status, count)
+			isBlocked := count > 0
+			if isBlocked != tt.expectBlocked {
+				t.Errorf("status %s: expected blocked=%v, got blocked=%v (count=%d)", tt.runStatus, tt.expectBlocked, isBlocked, count)
 			}
 		})
+	}
+}
+
+// TestJiraPoller_BotCommentDoesNotTrigger tests that when the latest comment
+// was authored by the bot's accountId, the poller should skip dispatch.
+func TestJiraPoller_BotCommentDoesNotTrigger(t *testing.T) {
+	// Unit test - no DB required
+	botAccountID := "bot-account-123"
+	userAccountID := "user-account-456"
+
+	tests := []struct {
+		name                     string
+		latestCommentAuthorID    string
+		botAccountID             string
+		shouldSkip               bool
+	}{
+		{
+			name:                     "bot comment should be skipped",
+			latestCommentAuthorID:    botAccountID,
+			botAccountID:             botAccountID,
+			shouldSkip:               true,
+		},
+		{
+			name:                     "user comment should not be skipped",
+			latestCommentAuthorID:    userAccountID,
+			botAccountID:             botAccountID,
+			shouldSkip:               false,
+		},
+		{
+			name:                     "empty bot account ID should not skip",
+			latestCommentAuthorID:    botAccountID,
+			botAccountID:             "",
+			shouldSkip:               false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate bot comment check logic
+			shouldSkip := tt.latestCommentAuthorID != "" && tt.botAccountID != "" && tt.latestCommentAuthorID == tt.botAccountID
+
+			if shouldSkip != tt.shouldSkip {
+				t.Errorf("expected shouldSkip=%v, got %v", tt.shouldSkip, shouldSkip)
+			}
+		})
+	}
+}
+
+// TestJiraPoller_UserCommentTriggers tests that when the latest comment
+// was authored by a non-bot user, the poller should proceed to dispatch.
+func TestJiraPoller_UserCommentTriggers(t *testing.T) {
+	// Unit test - no DB required
+	botAccountID := "bot-account-123"
+	userAccountID := "user-account-456"
+
+	// Test user comment should proceed (not skip)
+	shouldSkip := userAccountID != "" && botAccountID != "" && userAccountID == botAccountID
+	if shouldSkip {
+		t.Error("user comment should not be skipped for dispatch")
+	}
+}
+
+// TestJiraPoller_DedupKeyIncludesCommentID tests that the dedup key format
+// correctly includes the comment ID for proper event-level deduplication.
+func TestJiraPoller_DedupKeyIncludesCommentID(t *testing.T) {
+	// Unit test - no DB required
+	tests := []struct {
+		name              string
+		issueKey          string
+		latestCommentID   string
+		expectedDedupKey  string
+	}{
+		{
+			name:              "issue with comment",
+			issueKey:          "ISSUE-123",
+			latestCommentID:   "10042",
+			expectedDedupKey:  "ISSUE-123:10042",
+		},
+		{
+			name:              "issue without comment",
+			issueKey:          "ISSUE-456",
+			latestCommentID:   "",
+			expectedDedupKey:  "ISSUE-456:no-comment",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate dedup key generation logic
+			var dedupKey string
+			if tt.latestCommentID != "" {
+				dedupKey = tt.issueKey + ":" + tt.latestCommentID
+			} else {
+				dedupKey = tt.issueKey + ":no-comment"
+			}
+
+			if dedupKey != tt.expectedDedupKey {
+				t.Errorf("expected dedupKey=%s, got %s", tt.expectedDedupKey, dedupKey)
+			}
+		})
+	}
+}
+
+// TestJiraPoller_SameCommentNotDispatchedTwice tests that the dispatched_dedup
+// table properly prevents the same issue+comment from being dispatched twice.
+func TestJiraPoller_SameCommentNotDispatchedTwice(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
+
+	// Setup test data
+	repo := "PULP"
+	itemNumber := "ISSUE-123:10042"
+	scheduleID := "test-workflow-id"
+
+	// Clean up any existing entries
+	_, err := db.Exec(ctx, "DELETE FROM dispatched_dedup WHERE repo = $1 AND item_number = $2 AND schedule_id = $3", repo, itemNumber, scheduleID)
+	if err != nil {
+		t.Fatalf("failed to clean up test data: %v", err)
+	}
+
+	// First insert should succeed
+	result1, err := db.Exec(ctx, `
+		INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, repo, itemNumber, scheduleID)
+	if err != nil {
+		t.Fatalf("failed to insert first dedup entry: %v", err)
+	}
+
+	if result1.RowsAffected() != 1 {
+		t.Errorf("expected first insert to affect 1 row, got %d", result1.RowsAffected())
+	}
+
+	// Second insert should be blocked (no rows affected due to conflict)
+	result2, err := db.Exec(ctx, `
+		INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, repo, itemNumber, scheduleID)
+	if err != nil {
+		t.Fatalf("failed to attempt second dedup insert: %v", err)
+	}
+
+	if result2.RowsAffected() != 0 {
+		t.Errorf("expected second insert to be blocked (0 rows affected), got %d", result2.RowsAffected())
+	}
+}
+
+// TestJiraPoller_NewCommentDispatchesAgain tests the core conversation pattern:
+// a new comment on the same issue should trigger a new workflow run.
+func TestJiraPoller_NewCommentDispatchesAgain(t *testing.T) {
+	// Skip test if no database URL is configured
+	if testing.Short() {
+		t.Skip("skipping database integration test in short mode")
+	}
+
+	ctx := context.Background()
+	db := getTestDB(t)
+	defer db.Close()
+
+	// Setup test data
+	repo := "PULP"
+	issueKey := "ISSUE-123"
+	oldCommentID := "10042"
+	newCommentID := "10043"
+	scheduleID := "test-workflow-id"
+
+	oldItemNumber := issueKey + ":" + oldCommentID
+	newItemNumber := issueKey + ":" + newCommentID
+
+	// Clean up any existing entries
+	_, err := db.Exec(ctx, "DELETE FROM dispatched_dedup WHERE repo = $1 AND (item_number = $2 OR item_number = $3)", repo, oldItemNumber, newItemNumber)
+	if err != nil {
+		t.Fatalf("failed to clean up test data: %v", err)
+	}
+
+	// Insert dedup entry for old comment
+	_, err = db.Exec(ctx, `
+		INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
+		VALUES ($1, $2, $3)
+	`, repo, oldItemNumber, scheduleID)
+	if err != nil {
+		t.Fatalf("failed to insert dedup entry for old comment: %v", err)
+	}
+
+	// Attempt to dispatch for new comment - should succeed
+	result, err := db.Exec(ctx, `
+		INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, repo, newItemNumber, scheduleID)
+	if err != nil {
+		t.Fatalf("failed to attempt dispatch for new comment: %v", err)
+	}
+
+	if result.RowsAffected() != 1 {
+		t.Errorf("expected new comment dispatch to succeed (1 row affected), got %d", result.RowsAffected())
 	}
 }
 
@@ -562,3 +536,4 @@ func setupDedupTestData(t *testing.T, ctx context.Context, db *pgxpool.Pool, tea
 		t.Fatalf("failed to create test workflow: %v", err)
 	}
 }
+

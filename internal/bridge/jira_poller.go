@@ -210,14 +210,13 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 		return
 	}
 
-	// Clean up old dedup entries (older than 5 minutes), same as GitHub/GitLab pollers
+	// Clean up old dedup entries (older than 5 minutes)
 	_, _ = jp.db.Exec(ctx, `DELETE FROM dispatched_dedup WHERE dispatched_at < NOW() - INTERVAL '5 minutes'`)
 
-	// Resolve bot identity for this team's credentials (cached)
+	// Resolve bot identity for this team (with caching)
 	botAccountID, err := jp.resolveBotIdentity(ctx, token)
 	if err != nil {
-		log.Printf("jira-poller: warning: could not resolve bot identity for team %s: %v (continuing with dedup protection)", teamID, err)
-		// Continue without bot detection - the dedup layer still provides protection
+		log.Printf("jira-poller: warning: failed to resolve bot identity for team %s: %v (continuing without bot detection)", teamID, err)
 	}
 
 	// Collect all projects from targets.
@@ -450,63 +449,55 @@ func (jp *JiraPoller) jiraRequest(ctx context.Context, credential, method, reqUR
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-		return respBody, nil
+	return respBody, nil
+}
+
+// resolveBotIdentity calls GET /rest/api/3/myself to get the bot's accountId
+// and caches it using a hash of the credential for per-team uniqueness.
+func (jp *JiraPoller) resolveBotIdentity(ctx context.Context, credential string) (string, error) {
+	// Simple hash of credential for cache key
+	hash := fmt.Sprintf("%x", len(credential)) // Simple but sufficient for cache key
+
+	if accountID, exists := jp.botAccountIDs[hash]; exists {
+		return accountID, nil
 	}
 
-	// resolveBotIdentity calls GET /rest/api/3/myself to get the bot's accountId
-	// and caches it using a hash of the credential for per-team uniqueness.
-	func (jp *JiraPoller) resolveBotIdentity(ctx context.Context, credential string) (string, error) {
-		// Simple hash of credential for cache key
-		hash := fmt.Sprintf("%x", len(credential)) // Simple but sufficient for cache key
-
-		if accountID, exists := jp.botAccountIDs[hash]; exists {
-			return accountID, nil
-		}
-
-		myselfURL := fmt.Sprintf("%s/rest/api/3/myself", jp.baseURL)
-		data, err := jp.jiraRequest(ctx, credential, "GET", myselfURL, nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to resolve bot identity: %w", err)
-		}
-
-		var myselfResponse struct {
-			AccountID string `json:"accountId"`
-		}
-		if err := json.Unmarshal(data, &myselfResponse); err != nil {
-			return "", fmt.Errorf("failed to parse myself response: %w", err)
-		}
-
-		// Cache the result
-		jp.botAccountIDs[hash] = myselfResponse.AccountID
-		return myselfResponse.AccountID, nil
+	myselfURL := fmt.Sprintf("%s/rest/api/3/myself", jp.baseURL)
+	data, err := jp.jiraRequest(ctx, credential, "GET", myselfURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve bot identity: %w", err)
 	}
 
-	// fetchLatestComment fetches only the latest comment for an issue to extract metadata
-	// for non-enriched issues (past the 10-issue enrichment cap).
-	func (jp *JiraPoller) fetchLatestComment(ctx context.Context, credential, issueKey string) (string, string, error) {
-		commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=1&orderBy=-created", jp.baseURL, issueKey)
-
-		data, err := jp.jiraRequest(ctx, credential, "GET", commentsURL, nil)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to fetch latest comment: %w", err)
-		}
-
-		var comments struct {
-			Comments []struct {
-				ID     string `json:"id"`
-				Author struct {
-					AccountID string `json:"accountId"`
-				} `json:"author"`
-			} `json:"comments"`
-		}
-
-		if err := json.Unmarshal(data, &comments); err != nil {
-			return "", "", fmt.Errorf("failed to parse comments response: %w", err)
-		}
-
-		if len(comments.Comments) == 0 {
-			return "", "", nil // No comments
-		}
-
-		return comments.Comments[0].ID, comments.Comments[0].Author.AccountID, nil
+	var myselfResponse struct {
+		AccountID string `json:"accountId"`
 	}
+	if err := json.Unmarshal(data, &myselfResponse); err != nil {
+		return "", fmt.Errorf("failed to parse myself response: %w", err)
+	}
+
+	// Cache the result
+	jp.botAccountIDs[hash] = myselfResponse.AccountID
+	return myselfResponse.AccountID, nil
+}
+
+// fetchLatestComment fetches only the latest comment for an issue to extract metadata
+// for non-enriched issues (past the 10-issue enrichment cap).
+func (jp *JiraPoller) fetchLatestComment(ctx context.Context, credential, issueKey string) (string, string, error) {
+	commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=1&orderBy=-created", jp.baseURL, issueKey)
+
+	data, err := jp.jiraRequest(ctx, credential, "GET", commentsURL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to fetch latest comment: %w", err)
+	}
+
+	var comments JiraComments
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return "", "", fmt.Errorf("failed to parse comments response: %w", err)
+	}
+
+	if len(comments.Comments) == 0 {
+		return "", "", nil // No comments
+	}
+
+	return comments.Comments[0].ID, comments.Comments[0].Author.AccountID, nil
+}
