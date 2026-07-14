@@ -79,9 +79,11 @@ type JiraIssue struct {
 // JiraComments represents the comments response from JIRA
 type JiraComments struct {
 	Comments []struct {
+		ID     string `json:"id"`
 		Body   string `json:"body"`
 		Author struct {
 			DisplayName string `json:"displayName"`
+			AccountID   string `json:"accountId"`
 		} `json:"author"`
 		Created string `json:"created"`
 	} `json:"comments"`
@@ -170,9 +172,24 @@ func (jp *JiraPoller) enrichJiraIssueContext(ctx context.Context, token, issueKe
 	sb.WriteString(description + "\n")
 
 	// Fetch comments
-	commentsText := jp.enrichJiraComments(ctx, token, issueKey, &sb)
+	commentsText, latestCommentID, latestCommentAuthorID := jp.enrichJiraComments(ctx, token, issueKey, &sb)
 	if commentsText != "" {
 		additionalContext["issue_comments"] = commentsText
+	}
+	// Add latest comment metadata to additional context
+	if latestCommentID != "" {
+		additionalContext["latest_comment_id"] = latestCommentID
+	}
+	if latestCommentAuthorID != "" {
+		additionalContext["latest_comment_author_id"] = latestCommentAuthorID
+	}
+
+	// Add latest comment metadata to additional context
+	if latestCommentID != "" {
+		additionalContext["latest_comment_id"] = latestCommentID
+	}
+	if latestCommentAuthorID != "" {
+		additionalContext["latest_comment_author_id"] = latestCommentAuthorID
 	}
 
 	// Fetch sprint information
@@ -197,26 +214,31 @@ func (jp *JiraPoller) enrichJiraIssueContext(ctx context.Context, token, issueKe
 	return sb.String(), additionalContext
 }
 
-// enrichJiraComments fetches and formats comments for the issue
-func (jp *JiraPoller) enrichJiraComments(ctx context.Context, token, issueKey string, sb *strings.Builder) string {
+// enrichJiraComments fetches and formats comments for the issue.
+// Returns the formatted comment text and metadata for the latest comment.
+func (jp *JiraPoller) enrichJiraComments(ctx context.Context, token, issueKey string, sb *strings.Builder) (string, string, string) {
 	commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=%d&orderBy=-created",
 		jp.baseURL, issueKey, maxCommentsNum)
 
 	commentsData, err := jp.jiraRequest(ctx, token, "GET", commentsURL, nil)
 	if err != nil {
 		log.Printf("jira-poller: enrichment: could not fetch comments for issue %s: %v", issueKey, err)
-		return ""
+		return "", "", ""
 	}
 
 	var comments JiraComments
 	if err := json.Unmarshal(commentsData, &comments); err != nil {
 		log.Printf("jira-poller: enrichment: error parsing comments for issue %s: %v", issueKey, err)
-		return ""
+		return "", "", ""
 	}
 
 	if len(comments.Comments) == 0 {
-		return ""
+		return "", "", ""
 	}
+
+	// Extract latest comment metadata (first item in descending order)
+	latestCommentID := comments.Comments[0].ID
+	latestCommentAuthorID := comments.Comments[0].Author.AccountID
 
 	sb.WriteString(fmt.Sprintf("\n### Comments (%d)\n\n", len(comments.Comments)))
 
@@ -235,7 +257,8 @@ func (jp *JiraPoller) enrichJiraComments(ctx context.Context, token, issueKey st
 		sb.WriteString(fmt.Sprintf("**%s** (%s):\n%s\n\n", c.Author.DisplayName, dateStr, comment))
 	}
 
-	return strings.Join(commentsText, "\n")
+	// Return formatted text and latest comment metadata (comments are ordered by -created, so [0] is latest)
+	return strings.Join(commentsText, "\n"), latestCommentID, latestCommentAuthorID
 }
 
 // enrichJiraSprintContext fetches sprint information using the agile API

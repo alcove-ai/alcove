@@ -40,6 +40,7 @@ type JiraPoller struct {
 	pollInterval   time.Duration
 	lastPollTime   time.Time
 	client         *http.Client
+	botAccountIDs  map[string]string // keyed by credential hash for per-team caching
 }
 
 // NewJiraPoller creates a JiraPoller with the given dependencies.
@@ -53,6 +54,7 @@ func NewJiraPoller(db *pgxpool.Pool, credStore *CredentialStore, we *WorkflowEng
 		pollInterval:   2 * time.Minute,
 		lastPollTime:   time.Now().Add(-5 * time.Minute),
 		client:         &http.Client{Timeout: 30 * time.Second},
+		botAccountIDs:  make(map[string]string),
 	}
 }
 
@@ -208,6 +210,15 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 		return
 	}
 
+	// Clean up old dedup entries (older than 5 minutes)
+	_, _ = jp.db.Exec(ctx, `DELETE FROM dispatched_dedup WHERE dispatched_at < NOW() - INTERVAL '5 minutes'`)
+
+	// Resolve bot identity for this team (with caching)
+	botAccountID, err := jp.resolveBotIdentity(ctx, token)
+	if err != nil {
+		log.Printf("jira-poller: warning: failed to resolve bot identity for team %s: %v (continuing without bot detection)", teamID, err)
+	}
+
 	// Collect all projects from targets.
 	projectSet := make(map[string]bool)
 	for _, t := range targets {
@@ -287,21 +298,66 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 					continue
 				}
 
-				// Check dedup — don't dispatch the same issue twice for the same workflow.
-				var count int
-				jp.db.QueryRow(ctx, `
-					SELECT COUNT(*) FROM workflow_runs
-					WHERE workflow_id = $1 AND trigger_ref = $2
-					AND created_at > NOW() - INTERVAL '24 hours'
-					AND status NOT IN ('failed', 'cancelled')
-				`, workflowID, issue.Key).Scan(&count)
+				// Get latest comment metadata for dedup and bot detection
+				var latestCommentID, latestCommentAuthorID string
 
-				if count > 0 {
-					log.Printf("jira-poller: skipping %s — already dispatched recently (blocking run count: %d)", issue.Key, count)
-					continue // Already dispatched recently
+				// Always fetch comment metadata first for dedup/bot detection
+				// If we'll do enrichment, we'll fetch comments again but that's acceptable
+				id, authorID, err := jp.fetchLatestComment(ctx, token, issue.Key)
+				if err != nil {
+					log.Printf("jira-poller: warning: could not fetch latest comment for %s: %v", issue.Key, err)
+					// Continue with empty values - will use "no-comment" dedup key
+				} else {
+					latestCommentID = id
+					latestCommentAuthorID = authorID
 				}
 
-				log.Printf("jira-poller: triggering workflow %s for issue %s", workflowID, issue.Key)
+				// Bot-comment check: skip if latest comment is from the bot
+				if botAccountID != "" && latestCommentAuthorID == botAccountID {
+					log.Printf("jira-poller: skipping %s — latest comment by bot (%s)", issue.Key, botAccountID)
+					continue
+				}
+
+				// Build comment-aware dedup key
+				var dedupKey string
+				if latestCommentID != "" {
+					dedupKey = issue.Key + ":" + latestCommentID
+				} else {
+					dedupKey = issue.Key + ":no-comment"
+				}
+
+				// Insert into dispatched_dedup - only first inserter wins
+				issueProject := strings.Split(issue.Key, "-")[0]
+				dedupResult, err := jp.db.Exec(ctx,
+					`INSERT INTO dispatched_dedup (repo, item_number, schedule_id)
+					VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+					issueProject, dedupKey, workflowID)
+				if err != nil {
+					log.Printf("jira-poller: error inserting dedup entry for %s: %v", issue.Key, err)
+					continue
+				}
+				if dedupResult.RowsAffected() == 0 {
+					log.Printf("jira-poller: skipping %s — already dispatched for comment %s", issue.Key, dedupKey)
+					continue // Already dispatched for this comment
+				}
+
+				// Concurrent-run guard: prevent parallel runs for the same issue
+				var runCount int
+				err = jp.db.QueryRow(ctx, `
+					SELECT COUNT(*) FROM workflow_runs
+					WHERE workflow_id = $1 AND trigger_ref = $2
+					AND status IN ('running', 'pending', 'awaiting_approval')
+				`, workflowID, issue.Key).Scan(&runCount)
+				if err != nil {
+					log.Printf("jira-poller: error checking concurrent runs for %s: %v", issue.Key, err)
+					continue
+				}
+				if runCount > 0 {
+					log.Printf("jira-poller: skipping %s — workflow already running (active run count: %d)", issue.Key, runCount)
+					continue // Concurrent run protection
+				}
+
+				log.Printf("jira-poller: triggering workflow %s for issue %s (comment: %s)", workflowID, issue.Key, dedupKey)
 
 				var triggerContext map[string]interface{}
 
@@ -394,4 +450,54 @@ func (jp *JiraPoller) jiraRequest(ctx context.Context, credential, method, reqUR
 	}
 
 	return respBody, nil
+}
+
+// resolveBotIdentity calls GET /rest/api/3/myself to get the bot's accountId
+// and caches it using a hash of the credential for per-team uniqueness.
+func (jp *JiraPoller) resolveBotIdentity(ctx context.Context, credential string) (string, error) {
+	// Simple hash of credential for cache key
+	hash := fmt.Sprintf("%x", len(credential)) // Simple but sufficient for cache key
+
+	if accountID, exists := jp.botAccountIDs[hash]; exists {
+		return accountID, nil
+	}
+
+	myselfURL := fmt.Sprintf("%s/rest/api/3/myself", jp.baseURL)
+	data, err := jp.jiraRequest(ctx, credential, "GET", myselfURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve bot identity: %w", err)
+	}
+
+	var myselfResponse struct {
+		AccountID string `json:"accountId"`
+	}
+	if err := json.Unmarshal(data, &myselfResponse); err != nil {
+		return "", fmt.Errorf("failed to parse myself response: %w", err)
+	}
+
+	// Cache the result
+	jp.botAccountIDs[hash] = myselfResponse.AccountID
+	return myselfResponse.AccountID, nil
+}
+
+// fetchLatestComment fetches only the latest comment for an issue to extract metadata
+// for non-enriched issues (past the 10-issue enrichment cap).
+func (jp *JiraPoller) fetchLatestComment(ctx context.Context, credential, issueKey string) (string, string, error) {
+	commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=1&orderBy=-created", jp.baseURL, issueKey)
+
+	data, err := jp.jiraRequest(ctx, credential, "GET", commentsURL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to fetch latest comment: %w", err)
+	}
+
+	var comments JiraComments
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return "", "", fmt.Errorf("failed to parse comments response: %w", err)
+	}
+
+	if len(comments.Comments) == 0 {
+		return "", "", nil // No comments
+	}
+
+	return comments.Comments[0].ID, comments.Comments[0].Author.AccountID, nil
 }
