@@ -760,6 +760,57 @@ func (s *WorkflowStore) DeleteWorkflowsByRepo(ctx context.Context, repoURL, team
 	return nil
 }
 
+// DeleteWorkflowByID removes a specific workflow by ID and its related data.
+// This safely handles FK constraints by deleting in the correct order: nullify session refs → delete run steps → delete runs → delete workflow → delete schedule.
+func (s *WorkflowStore) DeleteWorkflowByID(ctx context.Context, workflowID, sourceKey string) (int, error) {
+	// Count existing runs for logging
+	var runCount int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1`, workflowID).Scan(&runCount)
+	if err != nil {
+		return 0, fmt.Errorf("counting workflow runs for workflow %s: %w", workflowID, err)
+	}
+
+	// Nullify session FK references to run steps and runs being deleted.
+	_, err = s.db.Exec(ctx, `
+		UPDATE sessions SET workflow_run_step_id = NULL WHERE workflow_run_step_id IN (
+			SELECT wrs.id FROM workflow_run_steps wrs
+			JOIN workflow_runs wr ON wrs.run_id = wr.id
+			WHERE wr.workflow_id = $1
+		)`, workflowID)
+	if err != nil {
+		return 0, fmt.Errorf("nullifying session step refs for workflow %s: %w", workflowID, err)
+	}
+	_, err = s.db.Exec(ctx, `
+		UPDATE sessions SET workflow_run_id = NULL WHERE workflow_run_id IN (
+			SELECT id FROM workflow_runs WHERE workflow_id = $1
+		)`, workflowID)
+	if err != nil {
+		return 0, fmt.Errorf("nullifying session run refs for workflow %s: %w", workflowID, err)
+	}
+	// Delete run steps, then runs, then workflow (FK order).
+	_, err = s.db.Exec(ctx, `
+		DELETE FROM workflow_run_steps WHERE run_id IN (
+			SELECT id FROM workflow_runs WHERE workflow_id = $1
+		)`, workflowID)
+	if err != nil {
+		return 0, fmt.Errorf("deleting workflow run steps for workflow %s: %w", workflowID, err)
+	}
+	_, err = s.db.Exec(ctx, `DELETE FROM workflow_runs WHERE workflow_id = $1`, workflowID)
+	if err != nil {
+		return 0, fmt.Errorf("deleting workflow runs for workflow %s: %w", workflowID, err)
+	}
+	_, err = s.db.Exec(ctx, `DELETE FROM workflows WHERE id = $1`, workflowID)
+	if err != nil {
+		return 0, fmt.Errorf("deleting workflow %s: %w", workflowID, err)
+	}
+	// Delete the associated schedule
+	_, err = s.db.Exec(ctx, `DELETE FROM schedules WHERE source_key = $1`, sourceKey)
+	if err != nil {
+		return 0, fmt.Errorf("deleting schedule for workflow %s: %w", sourceKey, err)
+	}
+	return runCount, nil
+}
+
 // ListWorkflows returns all workflow definitions owned by the given user.
 func (s *WorkflowStore) ListWorkflows(ctx context.Context, teamID string) ([]StoredWorkflowDefinition, error) {
 	rows, err := s.db.Query(ctx, `

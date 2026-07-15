@@ -257,6 +257,173 @@ func TestOrphanedCleanupDoesNotDeleteSchedulesFromOtherRepos(t *testing.T) {
 	assert.Equal(t, 0, removeCount, "schedule for removed repo should be deleted")
 }
 
+// TestStaleWorkflowDeletionWithFKConstraints tests the specific scenario where
+// stale workflows have existing workflow_runs and workflow_run_steps, and
+// ensures the FK-safe deletion sequence works correctly.
+func TestStaleWorkflowDeletionWithFKConstraints(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up test database
+	db := setupTestDB(t)
+	defer teardownTestDB(t, db)
+
+	// Create test team and user
+	teamID := createTestTeam(t, db, "test-team-fk", false)
+	username := "testuser"
+	createTestUser(t, db, username, teamID)
+
+	// Create stores
+	defStore := NewAgentDefStore(db)
+	workflowStore := NewWorkflowStore(db)
+	profileStore := NewProfileStore(db)
+	policyRuleStore := NewPolicyRuleStore(db)
+	repoGroupStore := NewRepoGroupStore(db)
+	settingsStore := NewSettingsStore(db)
+	syncer := NewAgentRepoSyncer(db, settingsStore, nil, defStore, nil, profileStore, policyRuleStore, workflowStore, repoGroupStore)
+
+	repoURL := "https://github.com/test-org/repo"
+
+	// Add initial repo configuration
+	enabled := true
+	repos := []SkillRepo{{URL: repoURL, Enabled: &enabled}}
+	reposJSON, _ := json.Marshal(repos)
+	_, err := db.Exec(ctx, `
+		INSERT INTO team_settings (team_id, key, value)
+		VALUES ($1, 'agent_repos', $2)
+		ON CONFLICT (team_id, key) DO UPDATE SET value = EXCLUDED.value
+	`, teamID, reposJSON)
+	require.NoError(t, err)
+
+	// Create a workflow with the old source_key format (no username prefix)
+	workflowDef := &WorkflowDefinition{
+		Name:       "test-workflow",
+		SourceRepo: repoURL,
+		SourceFile: "test-workflow.yml",
+		TeamID:     teamID,
+		Workflow:   []WorkflowStep{{ID: "step1", Agent: "test-agent"}},
+	}
+	oldSourceKey := repoURL + "::test-workflow.yml"
+	require.NoError(t, workflowStore.UpsertWorkflow(ctx, workflowDef, oldSourceKey, "raw yaml", ""))
+
+	// Get the workflow ID
+	workflows, err := workflowStore.ListWorkflowsByRepo(ctx, repoURL, teamID)
+	require.NoError(t, err)
+	require.Len(t, workflows, 1)
+	workflowID := workflows[0].ID
+
+	// Create workflow_runs and workflow_run_steps for the workflow
+	runID1 := uuid.New().String()
+	runID2 := uuid.New().String()
+	_, err = db.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, status, created_at, team_id)
+		VALUES ($1, $2, 'completed', NOW(), $3), ($4, $2, 'failed', NOW(), $3)
+	`, runID1, workflowID, teamID, runID2)
+	require.NoError(t, err)
+
+	stepID1 := uuid.New().String()
+	stepID2 := uuid.New().String()
+	stepID3 := uuid.New().String()
+	_, err = db.Exec(ctx, `
+		INSERT INTO workflow_run_steps (id, run_id, step_key, status, created_at)
+		VALUES ($1, $2, 'step1', 'completed', NOW()),
+		       ($3, $4, 'step1', 'failed', NOW()),
+		       ($5, $4, 'step2', 'cancelled', NOW())
+	`, stepID1, runID1, stepID2, runID2, stepID3, runID2)
+	require.NoError(t, err)
+
+	// Create some session references to the workflow runs and steps
+	sessionID1 := uuid.New().String()
+	sessionID2 := uuid.New().String()
+	_, err = db.Exec(ctx, `
+		INSERT INTO sessions (id, status, created_at, team_id, workflow_run_id, workflow_run_step_id)
+		VALUES ($1, 'completed', NOW(), $2, $3, $4),
+		       ($5, 'completed', NOW(), $2, $6, $7)
+	`, sessionID1, teamID, runID1, stepID1, sessionID2, teamID, runID2, stepID2)
+	require.NoError(t, err)
+
+	// Create a schedule for the workflow
+	scheduleID := uuid.New().String()
+	_, err = db.Exec(ctx, `
+		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
+		VALUES ($1, 'test-schedule', '0 0 * * *', 'test', '', '', 0, true, NOW(), $2, 'yaml', $3, 'cron')
+	`, scheduleID, teamID, oldSourceKey)
+	require.NoError(t, err)
+
+	// Verify all the test data exists
+	var runCount, stepCount, sessionCount, scheduleCount int
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1`, workflowID).Scan(&runCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, runCount)
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM workflow_run_steps WHERE run_id IN ($1, $2)`, runID1, runID2).Scan(&stepCount)
+	require.NoError(t, err)
+	assert.Equal(t, 3, stepCount)
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM sessions WHERE workflow_run_id IN ($1, $2) OR workflow_run_step_id IN ($3, $4, $5)`, runID1, runID2, stepID1, stepID2, stepID3).Scan(&sessionCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, sessionCount)
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE source_key = $1`, oldSourceKey).Scan(&scheduleCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, scheduleCount)
+
+	// Simulate the syncer finding the workflow with a new source_key format (with username prefix)
+	// But the old entry will be seen as stale because its source_key doesn't match any current file
+	newSourceKey := username + "::" + oldSourceKey
+	require.NoError(t, workflowStore.UpsertWorkflow(ctx, workflowDef, newSourceKey, "raw yaml", ""))
+
+	// Now the old workflow should be seen as stale when we sync
+	// Remove the repo configuration to trigger stale workflow cleanup
+	repos = []SkillRepo{} // No repos configured
+	reposJSON, _ = json.Marshal(repos)
+	_, err = db.Exec(ctx, `
+		UPDATE team_settings SET value = $1 WHERE team_id = $2 AND key = 'agent_repos'
+	`, reposJSON, teamID)
+	require.NoError(t, err)
+
+	// Run sync - this should clean up the stale workflow with FK constraints
+	require.NoError(t, syncer.SyncAll(ctx))
+
+	// Verify the old workflow and all its related data are cleaned up
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM workflows WHERE source_key = $1`, oldSourceKey).Scan(&runCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, runCount, "stale workflow should be deleted")
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1`, workflowID).Scan(&runCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, runCount, "workflow runs should be deleted")
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM workflow_run_steps WHERE run_id IN ($1, $2)`, runID1, runID2).Scan(&stepCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, stepCount, "workflow run steps should be deleted")
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE source_key = $1`, oldSourceKey).Scan(&scheduleCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, scheduleCount, "schedule should be deleted")
+
+	// Verify session references were properly nullified (not deleted)
+	var nullRunCount, nullStepCount int
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM sessions WHERE id IN ($1, $2) AND workflow_run_id IS NULL`, sessionID1, sessionID2).Scan(&nullRunCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, nullRunCount, "session workflow_run_id refs should be nullified")
+
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM sessions WHERE id IN ($1, $2) AND workflow_run_step_id IS NULL`, sessionID1, sessionID2).Scan(&nullStepCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, nullStepCount, "session workflow_run_step_id refs should be nullified")
+
+	// Verify the new workflow with the new source_key format is still there
+	newWorkflows, err := workflowStore.ListWorkflowsByRepo(ctx, repoURL, teamID)
+	require.NoError(t, err)
+	found := false
+	for _, wf := range newWorkflows {
+		if wf.SourceKey == newSourceKey {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "new workflow with updated source_key should still exist")
+}
+
 // Helper functions for test setup
 func setupTestDB(t *testing.T) *pgxpool.Pool {
 	// This would connect to a test database

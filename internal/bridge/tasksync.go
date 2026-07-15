@@ -1097,12 +1097,16 @@ func (s *AgentRepoSyncer) syncWorkflowDefinitions(ctx context.Context, cloneDir 
 	}
 	for _, wf := range existing {
 		if !seenKeys[wf.SourceKey] {
-			// Remove the workflow and its schedule.
-			if _, err := s.db.Exec(ctx, `DELETE FROM workflows WHERE source_key = $1`, wf.SourceKey); err != nil {
+			// Delete the workflow and all its related data with proper FK handling.
+			runCount, err := s.workflowStore.DeleteWorkflowByID(ctx, wf.ID, wf.SourceKey)
+			if err != nil {
 				log.Printf("agent-repo-syncer: error deleting stale workflow %s: %v", wf.SourceKey, err)
-			}
-			if _, err := s.db.Exec(ctx, `DELETE FROM schedules WHERE source_key = $1`, wf.SourceKey); err != nil {
-				log.Printf("agent-repo-syncer: error deleting stale workflow schedule for %s: %v", wf.SourceKey, err)
+			} else {
+				if runCount > 0 {
+					log.Printf("agent-repo-syncer: deleted stale workflow %s (cleaned up %d runs)", wf.SourceKey, runCount)
+				} else {
+					log.Printf("agent-repo-syncer: deleted stale workflow %s", wf.SourceKey)
+				}
 			}
 		}
 	}
