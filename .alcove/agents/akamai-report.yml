@@ -1,0 +1,15 @@
+name: Akamai Traffic Report
+description: Analyzes 7-day Akamai traffic data from Splunk and generates a report
+executable:
+  url: https://github.com/pulp/pulp-service/releases/download/agent-akamai-report-20260715-d2f911e/agent-akamai-report
+  args: ["--model", "claude-opus-4-6"]
+  env:
+    SPLUNK_INSECURE_SKIP_VERIFY: "true"
+timeout: 1800
+credentials:
+  SPLUNK_TOKEN: splunk
+  SPLUNK_URL: splunk-url
+trigger:
+  schedule:
+    cron: "0 * * * *"
+    enabled: true
