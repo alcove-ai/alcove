@@ -424,6 +424,242 @@ func TestStaleWorkflowDeletionWithFKConstraints(t *testing.T) {
 	assert.True(t, found, "new workflow with updated source_key should still exist")
 }
 
+// TestOrphanedYAMLScheduleCleanup tests that orphaned YAML-sourced schedules
+// are cleaned up when their backing agent definitions or workflows are deleted.
+func TestOrphanedYAMLScheduleCleanup(t *testing.T) {
+	ctx := context.Background()
+
+	db := setupTestDB(t)
+	defer teardownTestDB(t, db)
+
+	teamID := createTestTeam(t, db, "test-team-orphaned-schedules", false)
+	username := "testuser"
+	createTestUser(t, db, username, teamID)
+
+	defStore := NewAgentDefStore(db)
+	workflowStore := NewWorkflowStore(db)
+	profileStore := NewProfileStore(db)
+	policyRuleStore := NewPolicyRuleStore(db)
+	repoGroupStore := NewRepoGroupStore(db)
+	settingsStore := NewSettingsStore(db)
+	syncer := NewAgentRepoSyncer(db, settingsStore, nil, defStore, nil, profileStore, policyRuleStore, workflowStore, repoGroupStore)
+
+	repoURL := "https://github.com/test-org/test-repo"
+
+	// Create an agent definition and associated schedule
+	agentDef := &AgentDefinition{
+		ID: uuid.New().String(),
+		Name: "test-agent",
+		SourceRepo: repoURL,
+		SourceFile: "test-agent.yml",
+		SourceKey: repoURL + "::test-agent.yml",
+		TeamID: teamID,
+		Prompt: "Test agent",
+	}
+	require.NoError(t, defStore.UpsertAgentDefinition(ctx, agentDef))
+
+	scheduleID := uuid.New().String()
+	_, err := db.Exec(ctx, `
+		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
+		VALUES ($1, 'test-schedule', '0 0 * * *', 'test prompt', '', '', 0, true, NOW(), $2, 'yaml', $3, 'cron')
+	`, scheduleID, teamID, agentDef.SourceKey)
+	require.NoError(t, err)
+
+	// Verify schedule exists
+	var count int
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE id = $1`, scheduleID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "schedule should exist before cleanup")
+
+	// Delete the agent definition (simulating it being removed from YAML)
+	_, err = db.Exec(ctx, `DELETE FROM agent_definitions WHERE id = $1`, agentDef.ID)
+	require.NoError(t, err)
+
+	// Run orphaned schedule reconciliation
+	err = syncer.reconcileOrphanedSchedules(ctx, repoURL, teamID)
+	require.NoError(t, err)
+
+	// Verify schedule was deleted
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE id = $1`, scheduleID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "orphaned schedule should be deleted")
+}
+
+// TestOrphanedWorkflowTriggerScheduleCleanup tests that orphaned schedules
+// for workflow triggers are cleaned up when the workflow is removed.
+func TestOrphanedWorkflowTriggerScheduleCleanup(t *testing.T) {
+	ctx := context.Background()
+
+	db := setupTestDB(t)
+	defer teardownTestDB(t, db)
+
+	teamID := createTestTeam(t, db, "test-team-workflow-schedules", false)
+	username := "testuser"
+	createTestUser(t, db, username, teamID)
+
+	defStore := NewAgentDefStore(db)
+	workflowStore := NewWorkflowStore(db)
+	profileStore := NewProfileStore(db)
+	policyRuleStore := NewPolicyRuleStore(db)
+	repoGroupStore := NewRepoGroupStore(db)
+	settingsStore := NewSettingsStore(db)
+	syncer := NewAgentRepoSyncer(db, settingsStore, nil, defStore, nil, profileStore, policyRuleStore, workflowStore, repoGroupStore)
+
+	repoURL := "https://github.com/test-org/test-workflow-repo"
+
+	// Create a workflow directly in the database
+	workflowID := uuid.New().String()
+	sourceKey := repoURL + "::test-workflow.yml"
+	_, err := db.Exec(ctx, `
+		INSERT INTO workflows (id, name, source_repo, source_file, source_key, raw_yaml, parsed, definition, team_id, created_at)
+		VALUES ($1, 'test-workflow', $2, 'test-workflow.yml', $3, 'test: yaml', '{}', '{}', $4, NOW())
+	`, workflowID, repoURL, sourceKey, teamID)
+	require.NoError(t, err)
+
+	scheduleID := uuid.New().String()
+	_, err = db.Exec(ctx, `
+		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
+		VALUES ($1, 'workflow-schedule', '0 0 * * *', 'workflow trigger', '', '', 0, true, NOW(), $2, 'yaml', $3, 'cron')
+	`, scheduleID, teamID, sourceKey)
+	require.NoError(t, err)
+
+	// Verify schedule exists
+	var count int
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE id = $1`, scheduleID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "schedule should exist before cleanup")
+
+	// Delete the workflow (simulating it being removed from YAML)
+	_, err = db.Exec(ctx, `DELETE FROM workflows WHERE id = $1`, workflowID)
+	require.NoError(t, err)
+
+	// Run orphaned schedule reconciliation
+	err = syncer.reconcileOrphanedSchedules(ctx, repoURL, teamID)
+	require.NoError(t, err)
+
+	// Verify schedule was deleted
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE id = $1`, scheduleID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "orphaned workflow trigger schedule should be deleted")
+}
+
+// TestNonYAMLScheduleCleanup tests that schedules with source != 'yaml' are cleaned up.
+func TestNonYAMLScheduleCleanup(t *testing.T) {
+	ctx := context.Background()
+
+	db := setupTestDB(t)
+	defer teardownTestDB(t, db)
+
+	teamID := createTestTeam(t, db, "test-team-non-yaml", false)
+	username := "testuser"
+	createTestUser(t, db, username, teamID)
+
+	defStore := NewAgentDefStore(db)
+	workflowStore := NewWorkflowStore(db)
+	profileStore := NewProfileStore(db)
+	policyRuleStore := NewPolicyRuleStore(db)
+	repoGroupStore := NewRepoGroupStore(db)
+	settingsStore := NewSettingsStore(db)
+	syncer := NewAgentRepoSyncer(db, settingsStore, nil, defStore, nil, profileStore, policyRuleStore, workflowStore, repoGroupStore)
+
+	// Create schedules with non-YAML sources
+	manualScheduleID := uuid.New().String()
+	_, err := db.Exec(ctx, `
+		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
+		VALUES ($1, 'manual-schedule', '0 0 * * *', 'manual prompt', '', '', 0, true, NOW(), $2, 'manual', 'manual-key', 'cron')
+	`, manualScheduleID, teamID)
+	require.NoError(t, err)
+
+	nullScheduleID := uuid.New().String()
+	_, err = db.Exec(ctx, `
+		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
+		VALUES ($1, 'null-schedule', '0 0 * * *', 'null prompt', '', '', 0, true, NOW(), $2, NULL, 'null-key', 'cron')
+	`, nullScheduleID, teamID)
+	require.NoError(t, err)
+
+	// Verify schedules exist
+	var count int
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE team_id = $1 AND (source IS NULL OR source != 'yaml')`, teamID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "non-YAML schedules should exist before cleanup")
+
+	// Create a minimal team repos config to trigger non-YAML cleanup
+	enabled := true
+	repos := []SkillRepo{{URL: "https://github.com/test/repo", Enabled: &enabled}}
+	reposJSON, _ := json.Marshal(repos)
+	_, err = db.Exec(ctx, `
+		INSERT INTO team_settings (team_id, key, value)
+		VALUES ($1, 'agent_repos', $2)
+	`, teamID, reposJSON)
+	require.NoError(t, err)
+
+	// Run SyncAll to trigger non-YAML schedule cleanup
+	err = syncer.SyncAll(ctx)
+	require.NoError(t, err)
+
+	// Verify schedules were deleted
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE team_id = $1 AND (source IS NULL OR source != 'yaml')`, teamID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "non-YAML schedules should be deleted")
+}
+
+// TestYAMLSchedulesSurviveReconciliation tests that valid YAML-backed schedules
+// are not deleted during reconciliation.
+func TestYAMLSchedulesSurviveReconciliation(t *testing.T) {
+	ctx := context.Background()
+
+	db := setupTestDB(t)
+	defer teardownTestDB(t, db)
+
+	teamID := createTestTeam(t, db, "test-team-yaml-survival", false)
+	username := "testuser"
+	createTestUser(t, db, username, teamID)
+
+	defStore := NewAgentDefStore(db)
+	workflowStore := NewWorkflowStore(db)
+	profileStore := NewProfileStore(db)
+	policyRuleStore := NewPolicyRuleStore(db)
+	repoGroupStore := NewRepoGroupStore(db)
+	settingsStore := NewSettingsStore(db)
+	syncer := NewAgentRepoSyncer(db, settingsStore, nil, defStore, nil, profileStore, policyRuleStore, workflowStore, repoGroupStore)
+
+	repoURL := "https://github.com/test-org/survival-repo"
+
+	// Create agent definition with backing schedule
+	agentDef := &AgentDefinition{
+		ID: uuid.New().String(),
+		Name: "surviving-agent",
+		SourceRepo: repoURL,
+		SourceFile: "surviving-agent.yml",
+		SourceKey: repoURL + "::surviving-agent.yml",
+		TeamID: teamID,
+		Prompt: "Surviving agent",
+	}
+	require.NoError(t, defStore.UpsertAgentDefinition(ctx, agentDef))
+
+	scheduleID := uuid.New().String()
+	_, err := db.Exec(ctx, `
+		INSERT INTO schedules (id, name, cron, prompt, provider, scope_preset, timeout, enabled, created_at, team_id, source, source_key, trigger_type)
+		VALUES ($1, 'surviving-schedule', '0 0 * * *', 'surviving prompt', '', '', 0, true, NOW(), $2, 'yaml', $3, 'cron')
+	`, scheduleID, teamID, agentDef.SourceKey)
+	require.NoError(t, err)
+
+	// Verify schedule exists
+	var count int
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE id = $1`, scheduleID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "schedule should exist before reconciliation")
+
+	// Run orphaned schedule reconciliation
+	err = syncer.reconcileOrphanedSchedules(ctx, repoURL, teamID)
+	require.NoError(t, err)
+
+	// Verify schedule still exists (not deleted)
+	err = db.QueryRow(ctx, `SELECT COUNT(*) FROM schedules WHERE id = $1`, scheduleID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "valid YAML schedule should survive reconciliation")
+}
+
 // Helper functions for test setup
 func setupTestDB(t *testing.T) *pgxpool.Pool {
 	// This would connect to a test database

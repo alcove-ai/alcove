@@ -306,6 +306,48 @@ func (s *AgentRepoSyncer) SyncAll(ctx context.Context) error {
 		}
 	}
 
+	// Clean up non-YAML schedules for all teams.
+	// Since the schedules API is read-only by design, any schedule with source != 'yaml'
+	// is orphaned and should be cleaned up.
+	for teamID := range allTeamsWithRepos {
+		rows, err := s.db.Query(ctx, `
+			SELECT id, name FROM schedules
+			WHERE (source IS NULL OR source != 'yaml') AND team_id = $1
+		`, teamID)
+		if err != nil {
+			log.Printf("agent-repo-syncer: error querying non-YAML schedules for team %s: %v", teamID, err)
+			continue
+		}
+
+		var schedulesToDelete []struct {
+			id   string
+			name string
+		}
+
+		for rows.Next() {
+			var schedID, schedName string
+			if err := rows.Scan(&schedID, &schedName); err != nil {
+				log.Printf("agent-repo-syncer: error scanning non-YAML schedule: %v", err)
+				continue
+			}
+			schedulesToDelete = append(schedulesToDelete, struct {
+				id   string
+				name string
+			}{schedID, schedName})
+		}
+		rows.Close()
+
+		// Delete the collected schedules
+		for _, sched := range schedulesToDelete {
+			_, err := s.db.Exec(ctx, `DELETE FROM schedules WHERE id = $1`, sched.id)
+			if err != nil {
+				log.Printf("agent-repo-syncer: error deleting non-YAML schedule %s (%s): %v", sched.name, sched.id, err)
+			} else {
+				log.Printf("agent-repo-syncer: deleted non-YAML schedule %s (%s) for team %s", sched.name, sched.id, teamID)
+			}
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("sync errors: %s", strings.Join(errs, "; "))
 	}
@@ -577,6 +619,11 @@ func (s *AgentRepoSyncer) syncRepo(ctx context.Context, repo SkillRepo, username
 
 	// Validate credential requirements in agent definitions.
 	s.validateCredentialRequirements(ctx, repo.URL, teamID)
+
+	// Reconcile orphaned schedules for this repo.
+	if err := s.reconcileOrphanedSchedules(ctx, repo.URL, teamID); err != nil {
+		log.Printf("agent-repo-syncer: orphaned schedule reconciliation error for %s: %v", repo.URL, err)
+	}
 
 	return nil
 }
@@ -1026,6 +1073,77 @@ func (s *AgentRepoSyncer) reconcileSchedule(ctx context.Context, td *AgentDefini
 	`, td.Name, cronExpr, td.Prompt, reposJSON, td.Provider,
 		td.Timeout, enabled, nextRun, td.Debug, triggerType, eventConfigJSON, existingID)
 	return err
+}
+
+// reconcileOrphanedSchedules removes YAML-sourced schedules for a repo that no longer
+// have a corresponding agent definition or workflow in the database.
+func (s *AgentRepoSyncer) reconcileOrphanedSchedules(ctx context.Context, repoURL, teamID string) error {
+	// Query all YAML-sourced schedules for this repo+team.
+	rows, err := s.db.Query(ctx, `
+		SELECT id, name, source_key
+		FROM schedules
+		WHERE source_key LIKE $1 AND team_id = $2 AND source = 'yaml'
+	`, repoURL+"::%", teamID)
+	if err != nil {
+		return fmt.Errorf("querying YAML schedules: %w", err)
+	}
+	defer rows.Close()
+
+	type schedule struct {
+		id        string
+		name      string
+		sourceKey string
+	}
+	var schedules []schedule
+
+	for rows.Next() {
+		var s schedule
+		if err := rows.Scan(&s.id, &s.name, &s.sourceKey); err != nil {
+			return fmt.Errorf("scanning schedule row: %w", err)
+		}
+		schedules = append(schedules, s)
+	}
+
+	// Check each schedule to see if its source_key matches an existing agent definition or workflow.
+	for _, sched := range schedules {
+		var exists bool
+
+		// Check if there's an agent definition with this source_key.
+		err := s.db.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM agent_definitions WHERE source_key = $1 AND team_id = $2)
+		`, sched.sourceKey, teamID).Scan(&exists)
+		if err != nil {
+			log.Printf("agent-repo-syncer: error checking agent definition for schedule %s: %v", sched.sourceKey, err)
+			continue
+		}
+
+		if exists {
+			continue // Schedule has a backing agent definition
+		}
+
+		// Check if there's a workflow with this source_key.
+		err = s.db.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM workflows WHERE source_key = $1 AND team_id = $2)
+		`, sched.sourceKey, teamID).Scan(&exists)
+		if err != nil {
+			log.Printf("agent-repo-syncer: error checking workflow for schedule %s: %v", sched.sourceKey, err)
+			continue
+		}
+
+		if exists {
+			continue // Schedule has a backing workflow
+		}
+
+		// This schedule is orphaned — delete it.
+		_, err = s.db.Exec(ctx, `DELETE FROM schedules WHERE id = $1`, sched.id)
+		if err != nil {
+			log.Printf("agent-repo-syncer: error deleting orphaned schedule %s (%s): %v", sched.name, sched.id, err)
+		} else {
+			log.Printf("agent-repo-syncer: deleted orphaned schedule %s (%s) with source_key %s", sched.name, sched.id, sched.sourceKey)
+		}
+	}
+
+	return nil
 }
 
 // syncWorkflowDefinitions syncs .alcove/workflows/*.yml from a cloned repo for the given user.
