@@ -319,21 +319,33 @@ func (s *AgentRepoSyncer) SyncAll(ctx context.Context) error {
 			continue
 		}
 
+		var schedulesToDelete []struct {
+			id   string
+			name string
+		}
+
 		for rows.Next() {
 			var schedID, schedName string
 			if err := rows.Scan(&schedID, &schedName); err != nil {
 				log.Printf("agent-repo-syncer: error scanning non-YAML schedule: %v", err)
 				continue
 			}
-
-			_, err := s.db.Exec(ctx, `DELETE FROM schedules WHERE id = $1`, schedID)
-			if err != nil {
-				log.Printf("agent-repo-syncer: error deleting non-YAML schedule %s (%s): %v", schedName, schedID, err)
-			} else {
-				log.Printf("agent-repo-syncer: deleted non-YAML schedule %s (%s) for team %s", schedName, schedID, teamID)
-			}
+			schedulesToDelete = append(schedulesToDelete, struct {
+				id   string
+				name string
+			}{schedID, schedName})
 		}
 		rows.Close()
+
+		// Delete the collected schedules
+		for _, sched := range schedulesToDelete {
+			_, err := s.db.Exec(ctx, `DELETE FROM schedules WHERE id = $1`, sched.id)
+			if err != nil {
+				log.Printf("agent-repo-syncer: error deleting non-YAML schedule %s (%s): %v", sched.name, sched.id, err)
+			} else {
+				log.Printf("agent-repo-syncer: deleted non-YAML schedule %s (%s) for team %s", sched.name, sched.id, teamID)
+			}
+		}
 	}
 
 	if len(errs) > 0 {
