@@ -90,6 +90,14 @@ func bridgeActionJiraCreateIssue(ctx context.Context, inputs map[string]interfac
 		}
 	}
 
+	// Add optional parent
+	parent := getStringInput(inputs, "parent")
+	if parent != "" {
+		fields["parent"] = map[string]interface{}{
+			"key": parent,
+		}
+	}
+
 	// Handle labels ([]string)
 	if labelsRaw, ok := inputs["labels"]; ok && labelsRaw != nil {
 		switch v := labelsRaw.(type) {
@@ -571,6 +579,12 @@ func bridgeActionJiraUpdateIssue(ctx context.Context, inputs map[string]interfac
 		fields["summary"] = summary
 	}
 
+	// Add optional description
+	description := getStringInput(inputs, "description")
+	if description != "" {
+		fields["description"] = wrapTextInADF(description)
+	}
+
 	if priority != "" {
 		fields["priority"] = map[string]interface{}{
 			"name": priority,
@@ -682,4 +696,187 @@ func wrapTextInADF(text string) map[string]interface{} {
 			},
 		},
 	}
+}
+
+// bridgeActionJiraGetIssue retrieves a single issue's fields from JIRA.
+func bridgeActionJiraGetIssue(ctx context.Context, inputs map[string]interface{}, credStore *CredentialStore, teamID string) (*BridgeActionResult, error) {
+	issueKey := getStringInput(inputs, "issue_key")
+	if issueKey == "" {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  "missing required input: issue_key",
+		}, nil
+	}
+
+	// Validate issue_key format to prevent path traversal
+	issueKeyRegex := regexp.MustCompile(`^[A-Z][A-Z0-9_]+-\d+$`)
+	if !issueKeyRegex.MatchString(issueKey) {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("invalid issue_key format: %s (must match [A-Z][A-Z0-9_]+-\\d+)", issueKey),
+		}, nil
+	}
+
+	fields := getStringInput(inputs, "fields")
+	if fields == "" {
+		fields = "summary,status,issuetype,parent"
+	}
+
+	token, apiHost, err := credStore.AcquireSCMTokenForOwner(ctx, "jira", teamID)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("failed to acquire JIRA token: %v", err),
+		}, nil
+	}
+
+	if apiHost == "" {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  "jira credential has no api_host configured — set api_host when creating the jira credential",
+		}, nil
+	}
+
+	// Get issue
+	getURL := fmt.Sprintf("%s/rest/api/3/issue/%s?fields=%s", apiHost, url.PathEscape(issueKey), url.QueryEscape(fields))
+	respData, err := jiraRequest(ctx, token, "GET", getURL, nil)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("error getting issue %s: %v", issueKey, err),
+		}, nil
+	}
+
+	var getResp struct {
+		Key    string `json:"key"`
+		Fields struct {
+			Summary   string `json:"summary"`
+			Status    *struct {
+				Name string `json:"name"`
+			} `json:"status"`
+			IssueType *struct {
+				Name string `json:"name"`
+			} `json:"issuetype"`
+			Parent *struct {
+				Key string `json:"key"`
+			} `json:"parent"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(respData, &getResp); err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("error parsing get response: %v", err),
+		}, nil
+	}
+
+	// Build structured output with safe nil handling
+	outputs := map[string]interface{}{
+		"issue_key": getResp.Key,
+		"summary":   getResp.Fields.Summary,
+	}
+
+	if getResp.Fields.Status != nil {
+		outputs["status"] = getResp.Fields.Status.Name
+	} else {
+		outputs["status"] = ""
+	}
+
+	if getResp.Fields.IssueType != nil {
+		outputs["issue_type"] = getResp.Fields.IssueType.Name
+	} else {
+		outputs["issue_type"] = ""
+	}
+
+	if getResp.Fields.Parent != nil {
+		outputs["parent_key"] = getResp.Fields.Parent.Key
+	} else {
+		outputs["parent_key"] = ""
+	}
+
+	return &BridgeActionResult{
+		Status:  "succeeded",
+		Outputs: outputs,
+	}, nil
+}
+
+// bridgeActionJiraLinkIssues creates a link between two JIRA issues.
+func bridgeActionJiraLinkIssues(ctx context.Context, inputs map[string]interface{}, credStore *CredentialStore, teamID string) (*BridgeActionResult, error) {
+	inwardIssue := getStringInput(inputs, "inward_issue")
+	outwardIssue := getStringInput(inputs, "outward_issue")
+	linkType := getStringInput(inputs, "link_type")
+
+	if inwardIssue == "" || outwardIssue == "" || linkType == "" {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  "missing required inputs: inward_issue, outward_issue, link_type",
+		}, nil
+	}
+
+	// Validate both issue keys
+	issueKeyRegex := regexp.MustCompile(`^[A-Z][A-Z0-9_]+-\d+$`)
+	if !issueKeyRegex.MatchString(inwardIssue) {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("invalid inward_issue format: %s (must match [A-Z][A-Z0-9_]+-\\d+)", inwardIssue),
+		}, nil
+	}
+	if !issueKeyRegex.MatchString(outwardIssue) {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("invalid outward_issue format: %s (must match [A-Z][A-Z0-9_]+-\\d+)", outwardIssue),
+		}, nil
+	}
+
+	token, apiHost, err := credStore.AcquireSCMTokenForOwner(ctx, "jira", teamID)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("failed to acquire JIRA token: %v", err),
+		}, nil
+	}
+
+	if apiHost == "" {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  "jira credential has no api_host configured — set api_host when creating the jira credential",
+		}, nil
+	}
+
+	// Build link request
+	linkReq := map[string]interface{}{
+		"type": map[string]interface{}{
+			"name": linkType,
+		},
+		"inwardIssue": map[string]interface{}{
+			"key": inwardIssue,
+		},
+		"outwardIssue": map[string]interface{}{
+			"key": outwardIssue,
+		},
+	}
+
+	linkJSON, err := json.Marshal(linkReq)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("error marshaling link request: %v", err),
+		}, nil
+	}
+
+	// Create link
+	linkURL := fmt.Sprintf("%s/rest/api/3/issueLink", apiHost)
+	_, err = jiraRequest(ctx, token, "POST", linkURL, linkJSON)
+	if err != nil {
+		return &BridgeActionResult{
+			Status: "failed",
+			Error:  fmt.Sprintf("error linking issues %s and %s: %v", inwardIssue, outwardIssue, err),
+		}, nil
+	}
+
+	return &BridgeActionResult{
+		Status: "succeeded",
+		Outputs: map[string]interface{}{
+			"linked": true,
+		},
+	}, nil
 }

@@ -84,6 +84,8 @@ func RegisterBridgeActions() map[string]BridgeActionHandler {
 		"jira-add-comment":      bridgeActionJiraAddComment,
 		"jira-search-issues":    bridgeActionJiraSearchIssues,
 		"jira-update-issue":     bridgeActionJiraUpdateIssue,
+		"jira-get-issue":        bridgeActionJiraGetIssue,
+		"jira-link-issues":      bridgeActionJiraLinkIssues,
 
 		// Search actions.
 		"search-gh-issues": bridgeActionSearchGHIssues,
@@ -486,6 +488,7 @@ func ListBridgeActionSchemas() []BridgeActionSchema {
 				"priority":    "string (optional) - Issue priority name",
 				"labels":      "[]string (optional) - Issue labels",
 				"components":  "[]string (optional) - Component names",
+				"parent":      "string (optional) - Parent issue key for sub-tasks (e.g., 'PROJ-123')",
 			},
 			Outputs: map[string]string{
 				"issue_key": "string - Created issue key (e.g., 'PROJ-123')",
@@ -538,9 +541,37 @@ func ListBridgeActionSchemas() []BridgeActionSchema {
 				"assignee":       "string (optional) - Set assignee (account ID, email, or username)",
 				"priority":       "string (optional) - Set priority name",
 				"summary":        "string (optional) - Update title/summary",
+				"description":    "string (optional) - Issue description (converted to ADF)",
 			},
 			Outputs: map[string]string{
 				"updated": "bool - Whether the issue was updated",
+			},
+		},
+		{
+			Name:        "jira-get-issue",
+			Description: "Retrieve a single issue's fields from JIRA",
+			Inputs: map[string]string{
+				"issue_key": "string (required) - JIRA issue key (e.g., 'PROJ-123')",
+				"fields":    "string (optional) - Comma-separated field list (default: 'summary,status,issuetype,parent')",
+			},
+			Outputs: map[string]string{
+				"issue_key":  "string - Issue key",
+				"summary":    "string - Issue summary/title",
+				"status":     "string - Issue status name",
+				"issue_type": "string - Issue type name",
+				"parent_key": "string - Parent issue key (empty if no parent)",
+			},
+		},
+		{
+			Name:        "jira-link-issues",
+			Description: "Create a link between two JIRA issues",
+			Inputs: map[string]string{
+				"inward_issue":  "string (required) - Inward issue key (e.g., 'PROJ-123')",
+				"outward_issue": "string (required) - Outward issue key (e.g., 'PROJ-124')",
+				"link_type":     "string (required) - Link type name (e.g., 'is defined by')",
+			},
+			Outputs: map[string]string{
+				"linked": "bool - Whether the link was created",
 			},
 		},
 		{
