@@ -147,6 +147,8 @@ var validBridgeActions = map[string]bool{
 	"jira-add-comment":      true,
 	"jira-search-issues":    true,
 	"jira-update-issue":     true,
+	"jira-get-issue":        true,
+	"jira-link-issues":      true,
 
 	// Search actions.
 	"search-gh-issues": true,

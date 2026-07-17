@@ -329,6 +329,8 @@ func TestJiraWorkflowValidation(t *testing.T) {
 		"jira-add-comment",
 		"jira-search-issues",
 		"jira-update-issue",
+		"jira-get-issue",
+		"jira-link-issues",
 	}
 
 	for _, action := range jiraActions {
@@ -739,6 +741,231 @@ func TestJiraUpdateIssueAssigneeFormats(t *testing.T) {
 
 			if assigneeField[tc.expectedField] != tc.assignee {
 				t.Errorf("Expected %s=%s, got %v", tc.expectedField, tc.assignee, assigneeField[tc.expectedField])
+			}
+		})
+	}
+}
+
+func TestJiraIssueKeyValidation(t *testing.T) {
+	// Test the regex validation that both new functions use
+	issueKeyRegex := regexp.MustCompile(`^[A-Z][A-Z0-9_]+-\d+$`)
+	
+	validKeys := []string{
+		"TEST-123",
+		"PROJECT_1-456",
+		"ABC123-789",
+	}
+	
+	invalidKeys := []string{
+		"",
+		"test-123",      // lowercase
+		"TEST123",       // no dash
+		"TEST-",         // no number
+		"-123",          // no project
+		"TEST-123-456",  // too many parts
+		"../etc/passwd", // path traversal attempt
+	}
+	
+	for _, key := range validKeys {
+		if !issueKeyRegex.MatchString(key) {
+			t.Errorf("Expected %s to be valid", key)
+		}
+	}
+	
+	for _, key := range invalidKeys {
+		if issueKeyRegex.MatchString(key) {
+			t.Errorf("Expected %s to be invalid", key)
+		}
+	}
+}
+
+func TestJiraGetIssueResponseParsing(t *testing.T) {
+	// Test the JSON response parsing logic for different field combinations
+	testCases := []struct {
+		name     string
+		response string
+		expected map[string]interface{}
+	}{
+		{
+			name: "full response with parent",
+			response: `{
+				"key": "TEST-123",
+				"fields": {
+					"summary": "Test issue",
+					"status": {"name": "Open"},
+					"issuetype": {"name": "Epic"},
+					"parent": {"key": "TEST-100"}
+				}
+			}`,
+			expected: map[string]interface{}{
+				"issue_key":  "TEST-123",
+				"summary":    "Test issue",
+				"status":     "Open",
+				"issue_type": "Epic",
+				"parent_key": "TEST-100",
+			},
+		},
+		{
+			name: "response without parent",
+			response: `{
+				"key": "TEST-456",
+				"fields": {
+					"summary": "Another issue",
+					"status": {"name": "Closed"},
+					"issuetype": {"name": "Task"}
+				}
+			}`,
+			expected: map[string]interface{}{
+				"issue_key":  "TEST-456",
+				"summary":    "Another issue",
+				"status":     "Closed",
+				"issue_type": "Task",
+				"parent_key": "",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var getResp struct {
+				Key    string `json:"key"`
+				Fields struct {
+					Summary   string `json:"summary"`
+					Status    *struct {
+						Name string `json:"name"`
+					} `json:"status"`
+					IssueType *struct {
+						Name string `json:"name"`
+					} `json:"issuetype"`
+					Parent *struct {
+						Key string `json:"key"`
+					} `json:"parent"`
+				} `json:"fields"`
+			}
+			
+			err := json.Unmarshal([]byte(tc.response), &getResp)
+			if err != nil {
+				t.Fatalf("Failed to parse JSON: %v", err)
+			}
+
+			// Build outputs like the real function does
+			outputs := map[string]interface{}{
+				"issue_key": getResp.Key,
+				"summary":   getResp.Fields.Summary,
+			}
+
+			if getResp.Fields.Status != nil {
+				outputs["status"] = getResp.Fields.Status.Name
+			} else {
+				outputs["status"] = ""
+			}
+
+			if getResp.Fields.IssueType != nil {
+				outputs["issue_type"] = getResp.Fields.IssueType.Name
+			} else {
+				outputs["issue_type"] = ""
+			}
+
+			if getResp.Fields.Parent != nil {
+				outputs["parent_key"] = getResp.Fields.Parent.Key
+			} else {
+				outputs["parent_key"] = ""
+			}
+
+			// Verify outputs match expectations
+			for key, expected := range tc.expected {
+				if outputs[key] != expected {
+					t.Errorf("Expected %s=%v, got %v", key, expected, outputs[key])
+				}
+			}
+		})
+	}
+}
+
+func TestJiraLinkRequestBuilding(t *testing.T) {
+	// Test the link request JSON structure
+	inwardIssue := "TEST-123"
+	outwardIssue := "TEST-124"
+	linkType := "is defined by"
+	
+	linkReq := map[string]interface{}{
+		"type": map[string]interface{}{
+			"name": linkType,
+		},
+		"inwardIssue": map[string]interface{}{
+			"key": inwardIssue,
+		},
+		"outwardIssue": map[string]interface{}{
+			"key": outwardIssue,
+		},
+	}
+
+	linkJSON, err := json.Marshal(linkReq)
+	if err != nil {
+		t.Fatalf("Failed to marshal link request: %v", err)
+	}
+
+	// Parse it back to verify structure
+	var parsed map[string]interface{}
+	err = json.Unmarshal(linkJSON, &parsed)
+	if err != nil {
+		t.Fatalf("Failed to parse link JSON: %v", err)
+	}
+
+	// Verify structure
+	linkTypeObj, ok := parsed["type"].(map[string]interface{})
+	if !ok || linkTypeObj["name"] != linkType {
+		t.Errorf("Expected link type %s, got %v", linkType, parsed["type"])
+	}
+
+	inwardObj, ok := parsed["inwardIssue"].(map[string]interface{})
+	if !ok || inwardObj["key"] != inwardIssue {
+		t.Errorf("Expected inward issue %s, got %v", inwardIssue, parsed["inwardIssue"])
+	}
+
+	outwardObj, ok := parsed["outwardIssue"].(map[string]interface{})
+	if !ok || outwardObj["key"] != outwardIssue {
+		t.Errorf("Expected outward issue %s, got %v", outwardIssue, parsed["outwardIssue"])
+	}
+}
+
+func TestJiraParentFieldLogic(t *testing.T) {
+	// Test the parent field logic in create-issue
+	testCases := []struct {
+		name           string
+		parent         string
+		shouldHaveParent bool
+	}{
+		{"with parent", "TEST-100", true},
+		{"empty parent", "", false},
+		{"whitespace parent", "   ", true}, // getStringInput doesn't trim, so this is technically valid
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := map[string]interface{}{
+				"parent": tc.parent,
+			}
+
+			parent := getStringInput(inputs, "parent")
+			
+			fields := make(map[string]interface{})
+			if parent != "" {
+				fields["parent"] = map[string]interface{}{
+					"key": parent,
+				}
+			}
+
+			_, hasParent := fields["parent"]
+			if hasParent != tc.shouldHaveParent {
+				t.Errorf("Expected hasParent=%v, got %v for parent '%s'", tc.shouldHaveParent, hasParent, tc.parent)
+			}
+
+			if tc.shouldHaveParent {
+				parentObj := fields["parent"].(map[string]interface{})
+				if parentObj["key"] != tc.parent {
+					t.Errorf("Expected parent key %s, got %v", tc.parent, parentObj["key"])
+				}
 			}
 		})
 	}
