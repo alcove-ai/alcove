@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +44,10 @@ import (
 
 // Version is set at build time via -ldflags.
 var Version = "dev"
+
+// primaryChildPID tracks the main process PID to prevent the SIGCHLD zombie reaper
+// from racing with cmd.Wait() and losing the real exit code.
+var primaryChildPID atomic.Int64
 
 // skillPluginDirs holds paths to cloned skill/agent repos for --plugin-dir flags.
 var skillPluginDirs []string
@@ -257,6 +262,43 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// determineOutcome determines the final outcome string based on context error,
+// current outcome state, success result flag, exit code, and event count.
+// This unifies outcome determination logic between runClaude() and runExecutable().
+func determineOutcome(ctxErr error, currentOutcome string, sawSuccessResult bool, exitCode int, eventCount int) string {
+	// Context timeout takes priority
+	if ctxErr != nil {
+		return "timeout"
+	}
+
+	// Preserve cancelled and timeout states from heartbeat/cancellation
+	if currentOutcome == "cancelled" {
+		return "cancelled"
+	}
+	if currentOutcome == "timeout" {
+		return "timeout"
+	}
+
+	// Success result from Claude Code takes priority (indicates "result" event with is_error=false)
+	if sawSuccessResult {
+		return "completed"
+	}
+
+	// Key fix: sessions with zero output events and exit code 0 are errors
+	// (likely timeout during startup with no meaningful work done)
+	if eventCount == 0 && exitCode == 0 {
+		return "error"
+	}
+
+	// Non-zero exit code indicates error
+	if exitCode != 0 {
+		return "error"
+	}
+
+	// Default: completed
+	return "completed"
+}
+
 // runExecutable downloads and executes a pre-compiled executable agent. It returns the exit code,
 // outcome string, artifacts, and any outputs.
 func runExecutable(
@@ -330,6 +372,9 @@ func runExecutable(
 		return 1, "error", nil, nil
 	}
 
+	// Store the primary child PID to prevent the SIGCHLD reaper from racing with cmd.Wait()
+	primaryChildPID.Store(int64(cmd.Process.Pid))
+
 	// WAL file for local transcript persistence
 	walPath := fmt.Sprintf("/tmp/alcove-transcript-%s.jsonl", sessionID)
 	walFile, err := os.Create(walPath)
@@ -389,6 +434,7 @@ func runExecutable(
 		doneCh     = make(chan struct{})
 		outcome    = "completed"
 		lineNumber = 0
+		eventCount = 0  // Track number of output events
 	)
 	defer ticker.Stop()
 
@@ -428,6 +474,7 @@ func runExecutable(
 	for ol := range ch {
 		lastEvent = time.Now()
 		lineNumber++
+		eventCount++  // Increment event count for each output line
 
 		// Create transcript event for this line
 		transcriptEvent := map[string]any{
@@ -482,26 +529,24 @@ func runExecutable(
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
-		} else if strings.Contains(err.Error(), "no child processes") {
-			// As PID 1 in a container, the child may already be reaped.
-			// If we captured stdout output, treat as success.
-			exitCode = 0
 		} else {
-			log.Printf("warning: cmd.Wait() error: %T: %v", err, err)
+			// After SIGCHLD fix, ECHILD should not occur. If it does, treat as error.
+			log.Printf("warning: unexpected cmd.Wait() error (ECHILD should not happen): %T: %v", err, err)
 			exitCode = 1
 		}
 	}
 
-	log.Printf("executable completed: exit=%d lines=%d", exitCode, lineNumber)
+	log.Printf("executable completed: exit=%d lines=%d events=%d", exitCode, lineNumber, eventCount)
 
-	// Determine outcome from exit code
-	if ctx.Err() != nil {
-		outcome = "timeout"
-	} else if exitCode == 0 {
-		outcome = "completed"
-	} else if outcome == "completed" {
-		outcome = "error"
+	// Step 3: Add explicit logging for silent agent crashes
+	if exitCode != 0 && eventCount == 0 {
+		log.Printf("ERROR: ALERT: agent exited %d with zero output events — likely startup crash", exitCode)
+	} else if exitCode == 0 && eventCount == 0 {
+		log.Printf("WARNING: agent exited 0 with zero output events — marking as error")
 	}
+
+	// Step 2b: Use unified outcome determination
+	outcome = determineOutcome(ctx.Err(), outcome, false, exitCode, eventCount)
 
 	// Check for PR artifact from task (same as Claude Code)
 	if prArtifact := readPRArtifact(); prArtifact != nil {
@@ -578,6 +623,9 @@ func runClaude(
 		return 1, "error", nil, nil
 	}
 
+	// Store the primary child PID to prevent the SIGCHLD reaper from racing with cmd.Wait()
+	primaryChildPID.Store(int64(cmd.Process.Pid))
+
 	// WAL file for local transcript persistence
 	walPath := fmt.Sprintf("/tmp/alcove-transcript-%s.jsonl", task.ID)
 	walFile, err := os.Create(walPath)
@@ -603,6 +651,7 @@ func runClaude(
 		doneCh           = make(chan struct{})
 		outcome          = "completed"
 		sawSuccessResult bool
+		eventCount       = 0  // Track number of output events
 	)
 	defer ticker.Stop()
 
@@ -643,6 +692,7 @@ func runClaude(
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		lastEvent = time.Now()
+		eventCount++  // Increment event count for each output line
 
 		// Write to WAL
 		if walFile != nil {
@@ -707,18 +757,17 @@ func runClaude(
 	} else {
 		log.Printf("DEBUG: claude stderr: (empty)")
 	}
-	log.Printf("DEBUG: claude exit code: %d", exitCode)
+	log.Printf("DEBUG: claude exit code: %d events: %d", exitCode, eventCount)
 
-	if ctx.Err() != nil {
-		outcome = "timeout"
-	} else if sawSuccessResult {
-		outcome = "completed"
-		// Do NOT override exitCode — the agent may have intentionally
-		// exited non-zero (e.g., review rejection, verification failure).
-		// The workflow engine uses exitCode to determine step success/failure.
-	} else if outcome == "completed" {
-		outcome = "error"
+	// Step 3: Add explicit logging for silent agent crashes
+	if exitCode != 0 && eventCount == 0 {
+		log.Printf("ERROR: ALERT: agent exited %d with zero output events — likely startup crash", exitCode)
+	} else if exitCode == 0 && eventCount == 0 {
+		log.Printf("WARNING: agent exited 0 with zero output events — marking as error")
 	}
+
+	// Step 2b: Use unified outcome determination
+	outcome = determineOutcome(ctx.Err(), outcome, sawSuccessResult, exitCode, eventCount)
 
 	// Check for PR artifact from task.
 	if prArtifact := readPRArtifact(); prArtifact != nil {
@@ -1301,6 +1350,11 @@ func init() {
 				pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
 				if pid <= 0 || err != nil {
 					break
+				}
+				// Skip reaping the primary child process — let cmd.Wait() handle it
+				// to preserve the real exit code.
+				if pid == int(primaryChildPID.Load()) {
+					continue
 				}
 			}
 		}

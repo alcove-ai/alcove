@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -212,5 +213,119 @@ func TestReadOutputArtifact_MissingFile(t *testing.T) {
 
 	if result != nil {
 		t.Errorf("Expected nil for missing file but got %v", result)
+	}
+}
+
+// TestDetermineOutcome tests the outcome determination logic.
+func TestDetermineOutcome(t *testing.T) {
+	tests := []struct {
+		name             string
+		ctxErr           error
+		currentOutcome   string
+		sawSuccessResult bool
+		exitCode         int
+		eventCount       int
+		expected         string
+	}{
+		{
+			name:             "context timeout takes priority",
+			ctxErr:           context.DeadlineExceeded,
+			currentOutcome:   "completed",
+			sawSuccessResult: true,
+			exitCode:         0,
+			eventCount:       10,
+			expected:         "timeout",
+		},
+		{
+			name:             "cancelled state preserved",
+			ctxErr:           nil,
+			currentOutcome:   "cancelled",
+			sawSuccessResult: false,
+			exitCode:         0,
+			eventCount:       5,
+			expected:         "cancelled",
+		},
+		{
+			name:             "heartbeat timeout preserved",
+			ctxErr:           nil,
+			currentOutcome:   "timeout",
+			sawSuccessResult: false,
+			exitCode:         0,
+			eventCount:       5,
+			expected:         "timeout",
+		},
+		{
+			name:             "success result with exit 0",
+			ctxErr:           nil,
+			currentOutcome:   "completed",
+			sawSuccessResult: true,
+			exitCode:         0,
+			eventCount:       10,
+			expected:         "completed",
+		},
+		{
+			name:             "success result with exit 1 (intentional failure)",
+			ctxErr:           nil,
+			currentOutcome:   "completed",
+			sawSuccessResult: true,
+			exitCode:         1,
+			eventCount:       10,
+			expected:         "completed",
+		},
+		{
+			name:             "exit 1 with no output - error",
+			ctxErr:           nil,
+			currentOutcome:   "completed",
+			sawSuccessResult: false,
+			exitCode:         1,
+			eventCount:       0,
+			expected:         "error",
+		},
+		{
+			name:             "exit 0 with no output - error (key fix)",
+			ctxErr:           nil,
+			currentOutcome:   "completed",
+			sawSuccessResult: false,
+			exitCode:         0,
+			eventCount:       0,
+			expected:         "error",
+		},
+		{
+			name:             "output events with no result and exit 0",
+			ctxErr:           nil,
+			currentOutcome:   "completed",
+			sawSuccessResult: false,
+			exitCode:         0,
+			eventCount:       5,
+			expected:         "completed",
+		},
+		{
+			name:             "output events with no result and exit 1",
+			ctxErr:           nil,
+			currentOutcome:   "completed",
+			sawSuccessResult: false,
+			exitCode:         1,
+			eventCount:       5,
+			expected:         "error",
+		},
+		{
+			name:             "NATS cancel with events",
+			ctxErr:           nil,
+			currentOutcome:   "cancelled",
+			sawSuccessResult: false,
+			exitCode:         1,
+			eventCount:       3,
+			expected:         "cancelled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := determineOutcome(tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount)
+			if result != tt.expected {
+				t.Errorf("determineOutcome(%v, %q, %t, %d, %d) = %q, want %q",
+					tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount, result, tt.expected)
+			}
+		})
 	}
 }
