@@ -407,6 +407,17 @@ alcove/
     to agents without duplicating them in agent definition prompts. See
     architecture decision #22.
 
+33. **Outcome Semantics Fix (#476)** — Sessions that exit with zero transcript
+    output now correctly produce `error` outcome instead of `completed`. The
+    previous `completed` status was a bug caused by SIGCHLD zombie reaper race
+    and ECHILD exit-code masking in `cmd/skiff-init/main.go`. Post-fix: 
+    `error`/`timeout`/`cancelled` session outcomes map to `failed` step status
+    in the workflow engine, properly blocking downstream steps that depend on
+    `.Succeeded` and enabling retry steps that depend on `.Failed`. The
+    reconcile handler (`dispatcher.go`) uses `transcript_event_count` to
+    classify orphaned sessions: zero events → `error`, non-zero → `completed`.
+    This prevents broken agents from silently progressing through SDLC pipelines.
+
 ## How to Run (Developer Workflow)
 
 See [getting-started.md](../getting-started.md) for the full quick-start guide.

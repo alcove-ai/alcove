@@ -1,8 +1,8 @@
 name: Test Routing - Verify Fail (exit 1)
 description: |
-  Documents that sys.exit(1) in Claude Code sessions does NOT propagate as step failure.
-  Expected: behaves identically to exit0 test — patch skipped.
-  With output contracts: contract routing overrides exit code — patch triggered.
+  Documents that sys.exit(1) in Claude Code sessions now correctly produces error outcome → failed step status.
+  Post-#476: error outcome → failed step status → patch step is triggered (verify.Failed dependency).
+  With output contracts: contract routing can still override exit code → patch triggered on verdict=fail.
 
 trigger:
   github:
