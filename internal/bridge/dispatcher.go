@@ -1048,23 +1048,6 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 			log.Printf("reconcile: marked exited session %s as %s", sessionID, outcome)
 			continue
 		}
-			} else if eventCount == 0 {
-				outcome = "error"
-			}
-
->>>>>>> be33c21 (Audit workflow pipelines for impact of outcome semantics change (#476))
-			d.updateSessionStatus(ctx, sessionID, outcome, nil, &now)
-			if d.workflowEngine != nil {
-				d.workflowEngine.OnStepCompletion(ctx, sessionID, outcome, nil)
-			}
-			orphaned++
-<<<<<<< HEAD
-			log.Printf("reconcile: marked exited session %s as %s", sessionID, outcome)
-=======
-			log.Printf("reconcile: marked exited session %s as %s (transcript_event_count=%d)", sessionID, outcome, eventCount)
->>>>>>> be33c21 (Audit workflow pipelines for impact of outcome semantics change (#476))
-			continue
-		}
 
 		// Check if session has exceeded its configured timeout.
 		var startedAt time.Time
