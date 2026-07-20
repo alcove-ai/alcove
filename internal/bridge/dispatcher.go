@@ -1024,25 +1024,45 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 		}
 
 		if err != nil || status == "not_found" {
-			// Container is gone — mark session as completed.
+			// Container is gone — check transcript_event_count to determine outcome.
 			now := time.Now().UTC()
-			d.updateSessionStatus(ctx, sessionID, "completed", nil, &now)
+			outcome := d.determineOrphanedSessionOutcome(ctx, sessionID)
+			d.updateSessionStatus(ctx, sessionID, outcome, nil, &now)
 			if d.workflowEngine != nil {
-				d.workflowEngine.OnStepCompletion(ctx, sessionID, "completed", nil)
+				d.workflowEngine.OnStepCompletion(ctx, sessionID, outcome, nil)
 			}
 			orphaned++
-			log.Printf("reconcile: marked orphaned session %s as completed (container gone)", sessionID)
+			log.Printf("reconcile: marked orphaned session %s as %s (container gone)", sessionID, outcome)
 			continue
 		}
 
 		if status == "exited" || status == "stopped" {
+			// Container exited or stopped — check transcript_event_count to determine outcome.
 			now := time.Now().UTC()
-			d.updateSessionStatus(ctx, sessionID, "completed", nil, &now)
+			outcome := d.determineOrphanedSessionOutcome(ctx, sessionID)
+			d.updateSessionStatus(ctx, sessionID, outcome, nil, &now)
 			if d.workflowEngine != nil {
-				d.workflowEngine.OnStepCompletion(ctx, sessionID, "completed", nil)
+				d.workflowEngine.OnStepCompletion(ctx, sessionID, outcome, nil)
 			}
 			orphaned++
-			log.Printf("reconcile: marked exited session %s as completed", sessionID)
+			log.Printf("reconcile: marked exited session %s as %s", sessionID, outcome)
+			continue
+		}
+			} else if eventCount == 0 {
+				outcome = "error"
+			}
+
+>>>>>>> be33c21 (Audit workflow pipelines for impact of outcome semantics change (#476))
+			d.updateSessionStatus(ctx, sessionID, outcome, nil, &now)
+			if d.workflowEngine != nil {
+				d.workflowEngine.OnStepCompletion(ctx, sessionID, outcome, nil)
+			}
+			orphaned++
+<<<<<<< HEAD
+			log.Printf("reconcile: marked exited session %s as %s", sessionID, outcome)
+=======
+			log.Printf("reconcile: marked exited session %s as %s (transcript_event_count=%d)", sessionID, outcome, eventCount)
+>>>>>>> be33c21 (Audit workflow pipelines for impact of outcome semantics change (#476))
 			continue
 		}
 
@@ -1128,6 +1148,29 @@ func (d *Dispatcher) ReconcileLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// determineOrphanedSessionOutcome checks transcript_event_count to determine whether
+// an orphaned session should be marked as "completed" or "error".
+// Post-#476: sessions with zero transcript events should be "error", not "completed".
+func (d *Dispatcher) determineOrphanedSessionOutcome(ctx context.Context, sessionID string) string {
+	var eventCount int
+	err := d.db.QueryRow(ctx,
+		`SELECT COALESCE(transcript_event_count, 0) FROM sessions WHERE id = $1`,
+		sessionID).Scan(&eventCount)
+	if err != nil {
+		log.Printf("reconcile: error querying transcript_event_count for session %s: %v", sessionID, err)
+		// Default to "error" if we can't determine - safer than assuming success
+		return "error"
+	}
+
+	if eventCount == 0 {
+		// Zero events means no work was done - should be error outcome
+		return "error"
+	}
+
+	// Non-zero events means some work was done - likely completed successfully
+	return "completed"
 }
 
 func (d *Dispatcher) updateSessionArtifacts(ctx context.Context, sessionID string, artifacts []internal.Artifact) {

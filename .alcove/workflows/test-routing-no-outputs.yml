@@ -1,8 +1,8 @@
 name: Test Routing - No Outputs
 description: |
   Tests engine behavior when an agent produces no /tmp/alcove-outputs.json.
-  Documents: missing outputs are silently treated as success today.
-  With output contracts: contract violation caught, step retried then failed.
+  Post-#476: missing outputs now produce error outcome → failed step status → downstream steps blocked.
+  Output contract validation is never reached (short-circuited by status != "completed" check).
 
 trigger:
   github:
