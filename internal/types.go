@@ -71,6 +71,8 @@ type Session struct {
 	TeamID            string     `json:"team_id,omitempty"`
 	WorkflowRunID     string     `json:"workflow_run_id,omitempty"`
 	WorkflowRunStepID string     `json:"workflow_run_step_id,omitempty"`
+	TranscriptEventCount int     `json:"transcript_event_count"`
+	ProxyEventCount      int     `json:"proxy_event_count"`
 	// Workflow metadata (enriched from joins, not stored in sessions table)
 	WorkflowName      string     `json:"workflow_name,omitempty"`
 	WorkflowRunStatus string     `json:"workflow_run_status,omitempty"`

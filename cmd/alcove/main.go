@@ -758,15 +758,16 @@ type listResponse struct {
 }
 
 type sessionSummary struct {
-	ID        string `json:"id"`
-	Prompt    string `json:"prompt"`
-	Repo      string `json:"repo,omitempty"`
-	Provider  string `json:"provider"`
-	Status    string `json:"status"`
-	StartedAt string `json:"started_at"`
-	Duration  string `json:"duration,omitempty"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	Agent     string `json:"agent,omitempty"`
+	ID                   string `json:"id"`
+	Prompt               string `json:"prompt"`
+	Repo                 string `json:"repo,omitempty"`
+	Provider             string `json:"provider"`
+	Status               string `json:"status"`
+	StartedAt            string `json:"started_at"`
+	Duration             string `json:"duration,omitempty"`
+	ExitCode             *int   `json:"exit_code,omitempty"`
+	Agent                string `json:"agent,omitempty"`
+	TranscriptEventCount int    `json:"transcript_event_count"`
 }
 
 func runList(cmd *cobra.Command, _ []string) error {
@@ -821,14 +822,14 @@ func runList(cmd *cobra.Command, _ []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATUS\tREPO\tPROVIDER\tAGENT\tDURATION\tPROMPT")
+	fmt.Fprintln(w, "ID\tSTATUS\tREPO\tPROVIDER\tAGENT\tEVENTS\tDURATION\tPROMPT")
 	for _, s := range result.Sessions {
 		prompt := s.Prompt
 		if len(prompt) > 50 {
 			prompt = prompt[:47] + "..."
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			s.ID, s.Status, s.Repo, s.Provider, s.Agent, s.Duration, prompt)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			s.ID, s.Status, s.Repo, s.Provider, s.Agent, s.TranscriptEventCount, s.Duration, prompt)
 	}
 	return w.Flush()
 }
