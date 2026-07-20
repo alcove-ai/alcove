@@ -1433,6 +1433,7 @@
         try {
             const statusFilter = $('#filter-status').value;
             const workflowFilter = $('#filter-workflow').value;
+            const emptyTranscriptFilter = $('#filter-empty-transcript').checked;
             let runningSessions = [];
             let paginated = {};
 
@@ -1441,6 +1442,9 @@
                 let runningUrl = '/api/v1/sessions?status=running&per_page=100';
                 if (workflowFilter) {
                     runningUrl += '&workflow=' + encodeURIComponent(workflowFilter);
+                }
+                if (emptyTranscriptFilter) {
+                    runningUrl += '&empty_transcript=true';
                 }
                 const runningResp = await api('GET', runningUrl);
                 const runningData = await runningResp.json();
@@ -1457,6 +1461,9 @@
             }
             if (workflowFilter) {
                 paginatedUrl += '&workflow=' + encodeURIComponent(workflowFilter);
+            }
+            if (emptyTranscriptFilter) {
+                paginatedUrl += '&empty_transcript=true';
             }
 
             const paginatedResp = await api('GET', paginatedUrl);
@@ -1482,7 +1489,7 @@
         } catch (err) {
             hide(loading);
             if (err.message !== 'unauthorized' && err.message !== 'auth-error') {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--status-error);padding:24px;">Failed to load sessions. Check your connection and try again.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--status-error);padding:24px;">Failed to load sessions. Check your connection and try again.</td></tr>';
             }
         }
     }
@@ -1550,12 +1557,20 @@
             repoLabel = ' <span style="color:var(--text-muted);font-size:12px;">' + escapeHtml(repoSummary) + '</span>';
         }
 
+        // Events count with warning for zero-event non-running sessions
+        var eventsCount = s.transcript_event_count || 0;
+        var eventsHtml = eventsCount.toString();
+        if (eventsCount === 0 && !isRunning) {
+            eventsHtml = '<span style="color:var(--status-error);" title="No transcript events recorded">⚠ 0</span>';
+        }
+
         return '<tr class="clickable session-row session-row-' + escapeHtml(status) + '" data-session-id="' + escapeHtml(s.id) + '" tabindex="0" role="link">' +
             '<td><span class="status-dot status-dot-' + escapeHtml(status) + '" title="' + escapeHtml(status) + '"></span></td>' +
             '<td><span class="agent-type-pill agent-type-' + escapeHtml(taskType.color) + '">' + escapeHtml(taskType.label) + '</span>' + escapeHtml(taskName) + repoLabel + '</td>' +
             '<td>' + escapeHtml(submitter) + '</td>' +
             '<td>' + escapeHtml(when) + '</td>' +
             '<td class="mono">' + durationHtml + '</td>' +
+            '<td class="mono">' + eventsHtml + '</td>' +
             '<td>' + triggerHtml + '</td>' +
             '</tr>';
     }
@@ -1597,7 +1612,7 @@
 
         // Pinned running section - always visible when there are running sessions
         if (filteredRunning.length > 0) {
-            html += '<tr><td colspan="6" class="section-label section-label-running">RUNNING (' + filteredRunning.length + ')</td></tr>';
+            html += '<tr><td colspan="7" class="section-label section-label-running">RUNNING (' + filteredRunning.length + ')</td></tr>';
             filteredRunning.forEach(function (s) {
                 html += renderSessionRow(s);
             });
@@ -1613,7 +1628,7 @@
             else if (statusFilter === 'timeout') sectionTitle = 'TIMEOUT';
 
             if (filteredRunning.length > 0) {
-                html += '<tr><td colspan="6" class="section-label">' + sectionTitle + '</td></tr>';
+                html += '<tr><td colspan="7" class="section-label">' + sectionTitle + '</td></tr>';
             }
             filteredPaginated.forEach(function (s) {
                 html += renderSessionRow(s);
@@ -1678,7 +1693,7 @@
 
         // Running section
         if (running.length > 0) {
-            html += '<tr><td colspan="6" class="section-label section-label-running">RUNNING (' + running.length + ')</td></tr>';
+            html += '<tr><td colspan="7" class="section-label section-label-running">RUNNING (' + running.length + ')</td></tr>';
             running.forEach(function (s) {
                 html += renderSessionRow(s);
             });
@@ -1687,7 +1702,7 @@
         // Recent section
         if (recent.length > 0) {
             if (running.length > 0) {
-                html += '<tr><td colspan="6" class="section-label">RECENT</td></tr>';
+                html += '<tr><td colspan="7" class="section-label">RECENT</td></tr>';
             }
             recent.forEach(function (s) {
                 html += renderSessionRow(s);
@@ -1750,6 +1765,7 @@
     // Filters
     $('#filter-status').addEventListener('change', () => { currentPage = 1; loadSessions(); });
     $('#filter-workflow').addEventListener('input', debounce(() => { currentPage = 1; loadSessions(); }, 300));
+    $('#filter-empty-transcript').addEventListener('change', () => { currentPage = 1; loadSessions(); });
     $('#filter-search').addEventListener('input', debounce(() => { currentPage = 1; loadSessions(); }, 300));
 
     function startAutoRefresh() {
@@ -2475,7 +2491,8 @@
             { label: 'Started', value: formatTime(s.started_at) },
             { label: 'Finished', value: formatTime(s.finished_at) },
             { label: 'Duration', value: formatDuration(s.started_at, s.finished_at, s.duration) },
-            { label: 'Exit Code', value: s.exit_code !== undefined && s.exit_code !== null ? String(s.exit_code) : '-' }
+            { label: 'Exit Code', value: s.exit_code !== undefined && s.exit_code !== null ? String(s.exit_code) : '-' },
+            { label: 'Events', value: s.transcript_event_count !== undefined ? String(s.transcript_event_count) : '0', warning: s.transcript_event_count === 0 && s.status !== 'running' }
         ];
 
         if (s.repos && s.repos.length > 0) {
@@ -2497,6 +2514,8 @@
             let valueHtml;
             if (f.badge && f.value !== '-') {
                 valueHtml = '<span class="badge badge-' + escapeHtml(f.value) + '">' + escapeHtml(f.value) + '</span>';
+            } else if (f.warning) {
+                valueHtml = '<span style="color:var(--status-error);" title="No transcript events recorded">⚠ ' + escapeHtml(f.value) + '</span>';
             } else {
                 valueHtml = '<span>' + escapeHtml(f.value) + '</span>';
             }

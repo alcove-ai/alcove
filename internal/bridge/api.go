@@ -259,6 +259,7 @@ func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
 		since := query.Get("since")
 		until := query.Get("until")
 		workflow := query.Get("workflow")
+		emptyTranscript := query.Get("empty_transcript") == "true"
 		teamID := getActiveTeamID(r)
 
 		pageStr := query.Get("page")
@@ -273,7 +274,7 @@ func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
 			perPage = pp
 		}
 
-		sessions, total, err := a.listSessions(r.Context(), status, repo, agent, since, until, workflow, teamID, page, perPage)
+		sessions, total, err := a.listSessions(r.Context(), status, repo, agent, since, until, workflow, teamID, page, perPage, emptyTranscript)
 		if err != nil {
 			log.Printf("error: listing sessions: %v", err)
 			respondError(w, http.StatusInternalServerError, "failed to list sessions")
@@ -709,10 +710,11 @@ func (a *API) handleAppendTranscript(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 
-	// Atomic JSONB append — no read-modify-write race.
+	// Atomic JSONB append and count increment — no read-modify-write race.
 	_, err = a.db.Exec(ctx,
-		`UPDATE sessions SET transcript = COALESCE(transcript, '[]'::jsonb) || $1::jsonb WHERE id = $2`,
-		newEventsJSON, sessionID)
+		`UPDATE sessions SET transcript = COALESCE(transcript, '[]'::jsonb) || $1::jsonb,
+		transcript_event_count = COALESCE(transcript_event_count, 0) + $2 WHERE id = $3`,
+		newEventsJSON, len(req.Events), sessionID)
 	if err != nil {
 		log.Printf("error: updating transcript for session %s: %v", sessionID, err)
 		respondError(w, http.StatusInternalServerError, "failed to update transcript")
@@ -855,10 +857,11 @@ func (a *API) handleAppendProxyLog(w http.ResponseWriter, r *http.Request, sessi
 		return
 	}
 
-	// Atomic JSONB append — no read-modify-write race.
+	// Atomic JSONB append and count increment — no read-modify-write race.
 	_, err = a.db.Exec(ctx,
-		`UPDATE sessions SET proxy_log = COALESCE(proxy_log, '[]'::jsonb) || $1::jsonb WHERE id = $2`,
-		newEntriesJSON, sessionID)
+		`UPDATE sessions SET proxy_log = COALESCE(proxy_log, '[]'::jsonb) || $1::jsonb,
+		proxy_event_count = COALESCE(proxy_event_count, 0) + $2 WHERE id = $3`,
+		newEntriesJSON, len(req.Entries), sessionID)
 	if err != nil {
 		log.Printf("error: updating proxy log for session %s: %v", sessionID, err)
 		respondError(w, http.StatusInternalServerError, "failed to update proxy log")
@@ -964,7 +967,7 @@ func parseEventContext(prompt string) string {
 	return "Manual"
 }
 
-func (a *API) listSessions(ctx context.Context, status, repo, agent, since, until, workflow, teamID string, page, perPage int) ([]internal.Session, int, error) {
+func (a *API) listSessions(ctx context.Context, status, repo, agent, since, until, workflow, teamID string, page, perPage int, emptyTranscript bool) ([]internal.Session, int, error) {
 	whereClause := " WHERE 1=1"
 	args := []any{}
 	argN := 1
@@ -1015,6 +1018,9 @@ func (a *API) listSessions(ctx context.Context, status, repo, agent, since, unti
 		args = append(args, workflow)
 		argN++
 	}
+	if emptyTranscript {
+		whereClause += " AND s.transcript_event_count = 0"
+	}
 
 	// Count total matching sessions - need to include JOINs for workflow filtering
 	countQuery := `SELECT COUNT(*) FROM sessions s
@@ -1037,6 +1043,8 @@ func (a *API) listSessions(ctx context.Context, status, repo, agent, since, unti
 		s.repos,
 		s.workflow_run_id,
 		s.workflow_run_step_id,
+		s.transcript_event_count,
+		s.proxy_event_count,
 		w.name as workflow_name,
 		wr.status as workflow_run_status
 		FROM sessions s
@@ -1070,7 +1078,8 @@ func (a *API) listSessions(ctx context.Context, status, repo, agent, since, unti
 		if err := rows.Scan(&s.ID, &s.TaskID, &s.Submitter, &s.Prompt,
 			&scopeJSON, &s.Provider, &s.Status, &s.StartedAt, &finishedAt,
 			&exitCode, &artifactsJSON, &parentID, &taskName, &triggerType, &triggerRef, &reposJSON,
-			&workflowRunID, &workflowRunStepID, &workflowName, &workflowRunStatus); err != nil {
+			&workflowRunID, &workflowRunStepID, &s.TranscriptEventCount, &s.ProxyEventCount,
+			&workflowName, &workflowRunStatus); err != nil {
 			return nil, 0, err
 		}
 
@@ -1164,6 +1173,8 @@ func (a *API) getSession(ctx context.Context, id string) (*internal.Session, err
 		s.repos,
 		s.workflow_run_id,
 		s.workflow_run_step_id,
+		s.transcript_event_count,
+		s.proxy_event_count,
 		w.name as workflow_name,
 		wr.status as workflow_run_status
 		FROM sessions s
@@ -1176,7 +1187,8 @@ func (a *API) getSession(ctx context.Context, id string) (*internal.Session, err
 	).Scan(&s.ID, &s.TaskID, &s.Submitter, &s.Prompt,
 		&scopeJSON, &s.Provider, &s.Status, &s.StartedAt, &finishedAt,
 		&exitCode, &artifactsJSON, &parentID, &taskName, &triggerType, &triggerRef, &reposJSON,
-		&workflowRunID, &workflowRunStepID, &workflowName, &workflowRunStatus)
+		&workflowRunID, &workflowRunStepID, &s.TranscriptEventCount, &s.ProxyEventCount,
+		&workflowName, &workflowRunStatus)
 	if err != nil {
 		return nil, err
 	}

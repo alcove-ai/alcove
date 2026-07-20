@@ -134,6 +134,9 @@
                             <option value="timeout">Timeout</option>
                         </select>
                         <input type="text" id="filter-workflow" class="input input-small" placeholder="Filter by workflow..." aria-label="Filter by workflow">
+                        <label style="margin-left: 10px;">
+                            <input type="checkbox" id="filter-empty-transcript"> Empty transcript
+                        </label>
                         <input type="text" id="filter-search" class="input input-small" placeholder="Search sessions..." aria-label="Search sessions">
                     </div>
                 </div>
@@ -146,6 +149,7 @@
                                 <th>Submitter</th>
                                 <th>When</th>
                                 <th>Duration</th>
+                                <th>Events</th>
                                 <th>Trigger</th>
                             </tr>
                         </thead>
