@@ -391,7 +391,7 @@ func bridgeActionJiraSearchIssues(ctx context.Context, inputs map[string]interfa
 	}
 
 	// Search issues
-	searchURL := fmt.Sprintf("%s/rest/api/3/search?jql=%s&maxResults=%d&fields=key,summary,status,issuetype,priority",
+	searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&maxResults=%d&fields=key,summary,status,issuetype,priority",
 		apiHost, url.QueryEscape(jql), maxResults)
 
 	respData, err := jiraRequest(ctx, token, "GET", searchURL, nil)
