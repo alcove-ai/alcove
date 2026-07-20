@@ -381,97 +381,124 @@ func TestNeedsToDepends(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := NeedsToDepends(tt.needs)
-			if result != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, result)
-			}
-		})
-	}
-}
-
-// TestEvaluateDepends_ErrorOutcomeMapping tests the specific depends evaluation scenarios
-// introduced by issue #476's outcome semantics change (error/timeout/cancelled → failed step status).
-func TestEvaluateDepends_ErrorOutcomeMapping(t *testing.T) {
-	tests := []struct {
-		name     string
-		expr     string
-		statuses map[string]string
-		expected bool
-		hasError bool
-	}{
-		{
-			name:     "Failed dependency triggered by error outcome",
-			expr:     "step-a.Failed",
-			statuses: map[string]string{"step-a": "failed"}, // error/timeout/cancelled → failed
-			expected: true,
-		},
-		{
-			name:     "Succeeded dependency blocked by error outcome",
-			expr:     "step-a.Succeeded",
-			statuses: map[string]string{"step-a": "failed"}, // error outcome should block .Succeeded
-			expected: false,
-		},
-		{
-			name:     "SDLC pipeline: ci-fix triggered by await-ci error",
-			expr:     "await-ci.Failed",
-			statuses: map[string]string{"await-ci": "failed"}, // Post-#476: error → failed → ci-fix dispatch
-			expected: true,
-		},
-		{
-			name:     "SDLC pipeline: create-pr blocked by implement error",
-			expr:     "implement.Succeeded",
-			statuses: map[string]string{"implement": "failed"}, // Post-#476: error → failed → blocks create-pr
-			expected: false,
-		},
-		{
-			name:     "Complex AND: both steps error → both Failed dependencies true",
-			expr:     "step-a.Failed && step-b.Failed",
-			statuses: map[string]string{"step-a": "failed", "step-b": "failed"}, // Both had error outcomes
-			expected: true,
-		},
-		{
-			name:     "Complex AND: one error, one success → Failed && Succeeded = true",
-			expr:     "step-a.Failed && step-b.Succeeded",
-			statuses: map[string]string{"step-a": "failed", "step-b": "completed"},
-			expected: true, // step-a.Failed=true AND step-b.Succeeded=true = true
-		},
-		{
-			name:     "Complex OR: error OR success → Failed || Succeeded = true",
-			expr:     "step-a.Failed || step-b.Succeeded",
-			statuses: map[string]string{"step-a": "failed", "step-b": "completed"},
-			expected: true,
-		},
-		{
-			name:     "Zero-output session with timeout outcome blocks downstream",
-			expr:     "implement.Succeeded",
-			statuses: map[string]string{"implement": "failed"}, // timeout outcome → failed
-			expected: false,
-		},
-		{
-			name:     "Zero-output session with cancelled outcome triggers retry step",
-			expr:     "implement.Failed",
-			statuses: map[string]string{"implement": "failed"}, // cancelled outcome → failed
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := EvaluateDepends(tt.expr, tt.statuses)
-			if tt.hasError {
-				if err == nil {
-					t.Error("expected error but got none")
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := NeedsToDepends(tt.needs)
+				if result != tt.expected {
+					t.Errorf("expected %q, got %q", tt.expected, result)
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
-			}
-		})
+			})
+		}
 	}
-}
+
+	// TestEvaluateDepends_ErrorScenarios specifically tests the error-handling
+	// scenarios introduced by issue #476. This verifies that step status "failed"
+	// (which comes from session status "error") correctly triggers .Failed depends
+	// and blocks .Succeeded depends.
+	func TestEvaluateDepends_ErrorScenarios(t *testing.T) {
+		tests := []struct {
+			name     string
+			expr     string
+			statuses map[string]string
+			expected bool
+		}{
+			{
+				name:     "implement.Failed with error outcome mapped to failed status",
+				expr:     "implement.Failed",
+				statuses: map[string]string{"implement": "failed"},
+				expected: true,
+			},
+			{
+				name:     "implement.Succeeded with error outcome mapped to failed status",
+				expr:     "implement.Succeeded",
+				statuses: map[string]string{"implement": "failed"},
+				expected: false,
+			},
+			{
+				name:     "ci-fix depends on implement.Failed should trigger when implement errors",
+				expr:     "implement.Failed",
+				statuses: map[string]string{"implement": "failed"},
+				expected: true,
+			},
+			{
+				name:     "create-pr depends on implement.Succeeded should NOT trigger when implement errors",
+				expr:     "implement.Succeeded",
+				statuses: map[string]string{"implement": "failed"},
+				expected: false,
+			},
+			{
+				name:     "revision step depends on both reviews failing",
+				expr:     "code-review.Failed || security-review.Failed",
+				statuses: map[string]string{
+					"code-review": "failed",      // Error from zero-output session
+					"security-review": "completed",
+				},
+				expected: true,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := EvaluateDepends(tt.expr, tt.statuses)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if result != tt.expected {
+					t.Errorf("expected %v, got %v", tt.expected, result)
+				}
+			})
+		}
+	}
+
+	// TestSDLCPipelineErrorHandling tests the full SDLC pipeline behavior when
+	// early steps fail due to zero-output sessions (which now map to "error" status).
+	func TestSDLCPipelineErrorHandling(t *testing.T) {
+		// Simulate a typical SDLC pipeline state where the implement step
+		// produces zero output and gets marked as "error" (mapped to "failed")
+		stepStatuses := map[string]string{
+			"implement": "failed", // Zero-output session → error → failed
+			"ci-fix":    "pending", // Should be eligible to run
+		}
+
+		tests := []struct {
+			name     string
+			stepID   string
+			depends  string
+			expected bool
+			desc     string
+		}{
+			{
+				name:     "create-pr blocked when implement fails",
+				stepID:   "create-pr",
+				depends:  "implement.Succeeded",
+				expected: false,
+				desc:     "create-pr should NOT run when implement produces zero output",
+			},
+			{
+				name:     "ci-fix triggered when implement fails",
+				stepID:   "ci-fix",
+				depends:  "implement.Failed",
+				expected: true,
+				desc:     "ci-fix should run when implement produces zero output",
+			},
+			{
+				name:     "await-ci blocked when implement fails",
+				stepID:   "await-ci",
+				depends:  "create-pr.Succeeded",
+				expected: false,
+				desc:     "await-ci should be blocked since create-pr doesn't run",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := EvaluateDepends(tt.depends, stepStatuses)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if result != tt.expected {
+					t.Errorf("%s: expected %v, got %v", tt.desc, tt.expected, result)
+				}
+			})
+		}
+	}

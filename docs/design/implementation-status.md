@@ -371,6 +371,10 @@ alcove/
     becomes `max_iterations_exceeded` when exhausted). Iteration tracking is
     stored in `workflow_run_steps` (migration `028_workflow_graph_v2.sql`).
     The old `needs` list syntax remains supported for backward compatibility.
+    **Session outcome semantics**: Post-#476, sessions that exit with zero 
+    transcript output are correctly marked as `error` instead of `completed`. 
+    This means workflow steps that previously progressed past silently-failed 
+    agents now correctly fail, improving pipeline reliability.
 
 30. **Dev Containers** — Optional project-provided containers that run alongside
     Skiff so agents can build and test code in a project-specific environment.
