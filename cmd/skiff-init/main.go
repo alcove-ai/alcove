@@ -62,6 +62,7 @@ const (
 	walBatchSize            = 50
 	walFlushInterval        = 5 * time.Second
 	shutdownGrace           = 10 * time.Second
+	maxBatchSize            = 500  // Max events in memory to prevent unbounded growth
 )
 
 func main() {
@@ -227,6 +228,19 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), task.Timeout)
 	defer cancel()
 
+	// --- Set up cooperative SIGTERM handler ---
+	termCh := make(chan os.Signal, 1)
+	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-termCh
+		log.Printf("received %v, initiating graceful shutdown", sig)
+		cancel() // triggers cleanup path in main()
+		// Safety net: if cleanup hangs, force exit
+		time.Sleep(55 * time.Second)
+		log.Printf("graceful shutdown timed out, forcing exit")
+		os.Exit(128 + int(sig.(syscall.Signal)))
+	}()
+
 	// --- Check if this is an executable agent or Claude Code agent ---
 	var exitCode int
 	var outcome string
@@ -241,7 +255,10 @@ func main() {
 		exitCode, outcome, artifacts, outputs = runClaude(ctx, task, sessionID, hailClient, lc, heartbeatTimeout, cancelCh)
 	}
 
-	// --- Send final status ---
+	// --- Send final status with retry logic ---
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+
 	if hailClient != nil {
 		finalStatus := hail.StatusUpdate{
 			TaskID:    task.ID,
@@ -251,15 +268,40 @@ func main() {
 			Artifacts: artifacts,
 			Outputs:   outputs,
 		}
-		_ = hailClient.PublishStatus(task.ID, finalStatus)
+		retryWithBackoff(cleanupCtx, "NATS status publish", 3, 2*time.Second, func() error {
+			return hailClient.PublishStatus(task.ID, finalStatus)
+		})
 	}
 
-	if err := lc.UpdateSession(sessionID, outcome, &exitCode, artifacts); err != nil {
-		log.Printf("warning: failed to update final session status: %v", err)
-	}
+	retryWithBackoff(cleanupCtx, "session update", 3, 2*time.Second, func() error {
+		return lc.UpdateSession(sessionID, outcome, &exitCode, artifacts)
+	})
 
 	log.Printf("task %s finished: %s (exit %d)", task.ID, outcome, exitCode)
 	os.Exit(exitCode)
+}
+
+// retryWithBackoff executes fn with exponential backoff retry, checking context cancellation before each attempt.
+func retryWithBackoff(ctx context.Context, name string, maxAttempts int, baseDelay time.Duration, fn func() error) {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check context cancellation before each attempt
+		if err := ctx.Err(); err != nil {
+			log.Printf("error: %s context cancelled, aborting retry", name)
+			return
+		}
+
+		if err := fn(); err != nil {
+			log.Printf("warning: %s attempt %d/%d failed: %v", name, attempt, maxAttempts, err)
+			if attempt < maxAttempts {
+				time.Sleep(baseDelay * time.Duration(attempt))
+				continue
+			}
+			log.Printf("error: %s failed after %d attempts", name, maxAttempts)
+			return
+		}
+		log.Printf("%s succeeded on attempt %d", name, attempt)
+		return
+	}
 }
 
 // determineOutcome determines the final outcome string based on context error,
@@ -505,6 +547,11 @@ func runExecutable(
 		}
 
 		batchMu.Lock()
+		// Enforce max batch cap: drop oldest events to prevent unbounded memory growth
+		if len(batch) >= maxBatchSize {
+			// Keep the newest 499 events
+			batch = batch[len(batch)-maxBatchSize+1:]
+		}
 		batch = append(batch, json.RawMessage(eventJSON))
 
 		// Flush batch when it reaches the batch size
@@ -722,6 +769,11 @@ func runClaude(
 		}
 
 		batchMu.Lock()
+		// Enforce max batch cap: drop oldest events to prevent unbounded memory growth
+		if len(batch) >= maxBatchSize {
+			// Keep the newest 499 events
+			batch = batch[len(batch)-maxBatchSize+1:]
+		}
 		batch = append(batch, json.RawMessage(lineCopy))
 
 		// Flush batch when it reaches the batch size
@@ -783,12 +835,22 @@ func runClaude(
 	return exitCode, outcome, artifacts, outputs
 }
 
-// flushBatch sends a batch of transcript events to Ledger and clears the batch.
+// flushBatch sends a batch of transcript events to Ledger and clears the batch on success.
+// On failure, it retries with exponential backoff and preserves events in the batch.
 func flushBatch(lc *ledger.Client, sessionID string, batch *[]json.RawMessage) {
-	if err := lc.AppendTranscript(sessionID, *batch); err != nil {
-		log.Printf("warning: failed to flush transcript batch to Ledger: %v", err)
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := lc.AppendTranscript(sessionID, *batch); err != nil {
+			log.Printf("warning: flush transcript attempt %d/3 failed: %v", attempt, err)
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt) * time.Second)
+				continue
+			}
+			log.Printf("error: all flush attempts failed, retaining %d events in batch", len(*batch))
+			return // keep events in batch for next flush cycle
+		}
+		*batch = nil
+		return
 	}
-	*batch = nil
 }
 
 // readOutputArtifact checks for an outputs file written by the agent.
@@ -1358,14 +1420,5 @@ func init() {
 				}
 			}
 		}
-	}()
-
-	// Forward termination signals to allow graceful shutdown.
-	termCh := make(chan os.Signal, 1)
-	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		sig := <-termCh
-		log.Printf("received %v, shutting down", sig)
-		os.Exit(128 + int(sig.(syscall.Signal)))
 	}()
 }

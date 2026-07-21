@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -37,6 +38,7 @@ func Connect(url string) (*Client, error) {
 	nc, err := nats.Connect(url,
 		nats.Name("skiff-init"),
 		nats.MaxReconnects(-1),
+		nats.PingInterval(30*time.Second),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("hail: connect to %s: %w", url, err)
