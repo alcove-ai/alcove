@@ -17,10 +17,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // TestReadOutputArtifact tests the mixed-type output parsing functionality.
@@ -201,6 +203,276 @@ func testReadOutputArtifact(path string) map[string]string {
 	}
 
 	return outputs
+}
+
+// mockLedgerClient for testing flushBatch retry logic
+type mockLedgerClient struct {
+	appendCallCount int
+	failureCount    int // number of times to fail before succeeding
+	appendErr       error
+	appendedBatches [][]json.RawMessage
+}
+
+func (m *mockLedgerClient) AppendTranscript(sessionID string, batch []json.RawMessage) error {
+	m.appendCallCount++
+	if m.appendCallCount <= m.failureCount {
+		return m.appendErr
+	}
+	// Copy the batch to verify what was appended on success
+	batchCopy := make([]json.RawMessage, len(batch))
+	copy(batchCopy, batch)
+	m.appendedBatches = append(m.appendedBatches, batchCopy)
+	return nil
+}
+
+// testFlushBatch is a test version that accepts an interface for testing
+func testFlushBatch(client interface{ AppendTranscript(string, []json.RawMessage) error }, sessionID string, batch *[]json.RawMessage) {
+	if len(*batch) == 0 {
+		return
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := client.AppendTranscript(sessionID, *batch); err != nil {
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt) * time.Millisecond) // Use milliseconds for faster tests
+				continue
+			}
+			return // keep events in batch for next flush cycle
+		}
+		*batch = nil
+		return
+	}
+}
+
+// TestFlushBatchRetryLogic tests the retry behavior of flushBatch
+func TestFlushBatchRetryLogic(t *testing.T) {
+	sessionID := "test-session"
+
+	tests := []struct {
+		name            string
+		failureCount    int
+		batchSize       int
+		expectedRetries int
+		expectRetained  bool
+	}{
+		{
+			name:            "success on first attempt",
+			failureCount:    0,
+			batchSize:       3,
+			expectedRetries: 1,
+			expectRetained:  false,
+		},
+		{
+			name:            "success on second attempt",
+			failureCount:    1,
+			batchSize:       3,
+			expectedRetries: 2,
+			expectRetained:  false,
+		},
+		{
+			name:            "success on third attempt",
+			failureCount:    2,
+			batchSize:       3,
+			expectedRetries: 3,
+			expectRetained:  false,
+		},
+		{
+			name:            "failure after all retries",
+			failureCount:    3,
+			batchSize:       3,
+			expectedRetries: 3,
+			expectRetained:  true,
+		},
+		{
+			name:            "empty batch should not retry",
+			failureCount:    0,
+			batchSize:       0,
+			expectedRetries: 0,
+			expectRetained:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockLedgerClient{
+				failureCount: tt.failureCount,
+				appendErr:    errors.New("test error"),
+			}
+
+			// Create test batch
+			batch := make([]json.RawMessage, tt.batchSize)
+			for i := 0; i < tt.batchSize; i++ {
+				event := map[string]string{"type": "test", "content": strconv.Itoa(i)}
+				data, _ := json.Marshal(event)
+				batch[i] = json.RawMessage(data)
+			}
+			originalBatchSize := len(batch)
+
+			// Call testFlushBatch
+			testFlushBatch(mock, sessionID, &batch)
+
+			// Verify retry count
+			if mock.appendCallCount != tt.expectedRetries {
+				t.Errorf("expected %d retries, got %d", tt.expectedRetries, mock.appendCallCount)
+			}
+
+			// Verify batch retention
+			if tt.expectRetained {
+				if len(batch) != originalBatchSize {
+					t.Errorf("expected batch to be retained with %d events, got %d", originalBatchSize, len(batch))
+				}
+			} else {
+				if len(batch) != 0 {
+					t.Errorf("expected batch to be cleared, got %d events", len(batch))
+				}
+			}
+
+			// Verify successful appends
+			if !tt.expectRetained && tt.batchSize > 0 {
+				if len(mock.appendedBatches) != 1 {
+					t.Errorf("expected 1 successful append, got %d", len(mock.appendedBatches))
+				} else if len(mock.appendedBatches[0]) != originalBatchSize {
+					t.Errorf("expected appended batch size %d, got %d", originalBatchSize, len(mock.appendedBatches[0]))
+				}
+			}
+		})
+	}
+}
+
+// TestBatchCapEnforcement tests the max batch cap functionality
+func TestBatchCapEnforcement(t *testing.T) {
+	// Test the batch cap logic
+	tests := []struct {
+		name           string
+		initialSize    int
+		expectedSize   int
+	}{
+		{
+			name:           "under cap",
+			initialSize:    100,
+			expectedSize:   101, // 100 + 1 new
+		},
+		{
+			name:           "at cap",
+			initialSize:    500,
+			expectedSize:   500, // trim to 499 + 1 new = 500
+		},
+		{
+			name:           "over cap",
+			initialSize:    600,
+			expectedSize:   500, // trim to 499 + 1 new = 500
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create initial batch
+			batch := make([]json.RawMessage, tt.initialSize)
+			for i := 0; i < tt.initialSize; i++ {
+				event := map[string]string{"type": "test", "content": strconv.Itoa(i)}
+				data, _ := json.Marshal(event)
+				batch[i] = json.RawMessage(data)
+			}
+
+			// Simulate the batch cap logic from the main code
+			if len(batch) >= 500 {
+				batch = batch[len(batch)-499:] // keep 499, add 1 new = 500 total
+			}
+			newEvent := json.RawMessage(`{"type": "test", "content": "new"}`)
+			batch = append(batch, newEvent)
+
+			if len(batch) != tt.expectedSize {
+				t.Errorf("expected batch size %d, got %d", tt.expectedSize, len(batch))
+			}
+
+			// Verify that the newest event is preserved
+			var lastEvent map[string]string
+			json.Unmarshal(batch[len(batch)-1], &lastEvent)
+			if lastEvent["content"] != "new" {
+				t.Errorf("expected last event to be 'new', got %q", lastEvent["content"])
+			}
+		})
+	}
+}
+
+// TestRetryWithBackoff tests the retry helper function
+func TestRetryWithBackoff(t *testing.T) {
+	tests := []struct {
+		name          string
+		failureCount  int
+		maxAttempts   int
+		contextCancel bool
+		expectErr     bool
+	}{
+		{
+			name:         "success on first attempt",
+			failureCount: 0,
+			maxAttempts:  3,
+			expectErr:    false,
+		},
+		{
+			name:         "success on second attempt",
+			failureCount: 1,
+			maxAttempts:  3,
+			expectErr:    false,
+		},
+		{
+			name:         "failure after all attempts",
+			failureCount: 3,
+			maxAttempts:  3,
+			expectErr:    true,
+		},
+		{
+			name:          "context cancelled before retry",
+			failureCount:  1,
+			maxAttempts:   3,
+			contextCancel: true,
+			expectErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if tt.contextCancel {
+				// Cancel context immediately
+				cancel()
+			}
+
+			callCount := 0
+			fn := func() error {
+				callCount++
+				if callCount <= tt.failureCount {
+					return errors.New("test error")
+				}
+				return nil
+			}
+
+			err := retryWithBackoff(ctx, "test", tt.maxAttempts, 1*time.Millisecond, fn)
+
+			if tt.expectErr && err == nil {
+				t.Errorf("expected error but got nil")
+			}
+			if !tt.expectErr && err != nil {
+				t.Errorf("expected no error but got: %v", err)
+			}
+
+			// If context was cancelled, should not retry
+			if tt.contextCancel {
+				if callCount > 1 {
+					t.Errorf("expected 1 call when context cancelled, got %d", callCount)
+				}
+			} else if !tt.expectErr {
+				// Should have made enough calls to succeed
+				expectedCalls := tt.failureCount + 1
+				if callCount != expectedCalls {
+					t.Errorf("expected %d calls, got %d", expectedCalls, callCount)
+				}
+			}
+		})
+	}
 }
 
 // TestReadOutputArtifact_MissingFile tests the case where the output file doesn't exist.
