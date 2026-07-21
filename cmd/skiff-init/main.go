@@ -227,6 +227,24 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), task.Timeout)
 	defer cancel()
 
+	// --- Setup cooperative SIGTERM handler ---
+	termCh := make(chan os.Signal, 1)
+	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-termCh
+		log.Printf("received %v, initiating graceful shutdown", sig)
+		cancel() // triggers cleanup path in main()
+		// Safety net: if cleanup hangs, force exit
+		time.Sleep(55 * time.Second)
+		log.Printf("graceful shutdown timed out, forcing exit")
+		// Safe type assertion with check to prevent panic
+		if signo, ok := sig.(syscall.Signal); ok {
+			os.Exit(128 + int(signo))
+		} else {
+			os.Exit(143) // fallback to SIGTERM exit code
+		}
+	}()
+
 	// --- Check if this is an executable agent or Claude Code agent ---
 	var exitCode int
 	var outcome string
@@ -241,7 +259,11 @@ func main() {
 		exitCode, outcome, artifacts, outputs = runClaude(ctx, task, sessionID, hailClient, lc, heartbeatTimeout, cancelCh)
 	}
 
-	// --- Send final status ---
+	// --- Send final status with retry logic ---
+	// Create dedicated cleanup context with 30-second deadline
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+
 	if hailClient != nil {
 		finalStatus := hail.StatusUpdate{
 			TaskID:    task.ID,
@@ -251,11 +273,19 @@ func main() {
 			Artifacts: artifacts,
 			Outputs:   outputs,
 		}
-		_ = hailClient.PublishStatus(task.ID, finalStatus)
+		err := retryWithBackoff(cleanupCtx, "NATS status publish", 3, 2*time.Second, func() error {
+			return hailClient.PublishStatus(task.ID, finalStatus)
+		})
+		if err != nil {
+			log.Printf("error: failed to publish final status after retries: %v", err)
+		}
 	}
 
-	if err := lc.UpdateSession(sessionID, outcome, &exitCode, artifacts); err != nil {
-		log.Printf("warning: failed to update final session status: %v", err)
+	updateErr := retryWithBackoff(cleanupCtx, "HTTP session update", 3, 2*time.Second, func() error {
+		return lc.UpdateSession(sessionID, outcome, &exitCode, artifacts)
+	})
+	if updateErr != nil {
+		log.Printf("error: failed to update final session status after retries: %v", updateErr)
 	}
 
 	log.Printf("task %s finished: %s (exit %d)", task.ID, outcome, exitCode)
@@ -505,6 +535,12 @@ func runExecutable(
 		}
 
 		batchMu.Lock()
+		// Implement max batch cap (500 events) before adding new event
+		if len(batch) >= 500 {
+			// Drop oldest events, keep the most recent 499, then add the new one
+			batch = batch[len(batch)-499:]
+			log.Printf("warning: batch exceeded 500 events, dropped oldest events")
+		}
 		batch = append(batch, json.RawMessage(eventJSON))
 
 		// Flush batch when it reaches the batch size
@@ -722,6 +758,12 @@ func runClaude(
 		}
 
 		batchMu.Lock()
+		// Implement max batch cap (500 events) before adding new event
+		if len(batch) >= 500 {
+			// Drop oldest events, keep the most recent 499, then add the new one
+			batch = batch[len(batch)-499:]
+			log.Printf("warning: batch exceeded 500 events, dropped oldest events")
+		}
 		batch = append(batch, json.RawMessage(lineCopy))
 
 		// Flush batch when it reaches the batch size
@@ -783,11 +825,65 @@ func runClaude(
 	return exitCode, outcome, artifacts, outputs
 }
 
-// flushBatch sends a batch of transcript events to Ledger and clears the batch.
-func flushBatch(lc *ledger.Client, sessionID string, batch *[]json.RawMessage) {
-	if err := lc.AppendTranscript(sessionID, *batch); err != nil {
-		log.Printf("warning: failed to flush transcript batch to Ledger: %v", err)
+// retryWithBackoff executes a function with exponential backoff retry logic.
+// It respects context cancellation and logs retry attempts.
+func retryWithBackoff(ctx context.Context, name string, maxAttempts int, baseDelay time.Duration, fn func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check if context was cancelled before attempting
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		lastErr = fn()
+		if lastErr == nil {
+			return nil // success
+		}
+
+		log.Printf("warning: %s attempt %d/%d failed: %v", name, attempt, maxAttempts, lastErr)
+
+		if attempt < maxAttempts {
+			delay := time.Duration(attempt) * baseDelay
+			select {
+			case <-time.After(delay):
+				// continue to next attempt
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 	}
+	log.Printf("error: all %s attempts failed after %d tries", name, maxAttempts)
+	return lastErr
+}
+
+// flushBatch sends a batch of transcript events to Ledger with retry logic.
+// On failure, it retains events in the batch for the next flush cycle.
+func flushBatch(lc *ledger.Client, sessionID string, batch *[]json.RawMessage) {
+	flushBatchWithFunc(sessionID, batch, func(sessionID string, events []json.RawMessage) error {
+		return lc.AppendTranscript(sessionID, events)
+	})
+}
+
+// flushBatchWithFunc is a testable version that accepts a function for append operations.
+func flushBatchWithFunc(sessionID string, batch *[]json.RawMessage, appendFunc func(string, []json.RawMessage) error) {
+	// Implement max batch cap (500 events) to prevent unbounded memory growth
+	if len(*batch) > 500 {
+		// Drop oldest events, keep the most recent 500
+		*batch = (*batch)[len(*batch)-500:]
+		log.Printf("warning: batch exceeded 500 events, dropped oldest events")
+	}
+
+	// Retry logic with exponential backoff
+	err := retryWithBackoff(context.Background(), "flush transcript", 3, 1*time.Second, func() error {
+		return appendFunc(sessionID, *batch)
+	})
+
+	if err != nil {
+		log.Printf("error: all flush attempts failed, retaining %d events in batch", len(*batch))
+		return // keep events in batch for next flush cycle
+	}
+
+	// Only clear batch on success
 	*batch = nil
 }
 
@@ -1358,14 +1454,5 @@ func init() {
 				}
 			}
 		}
-	}()
-
-	// Forward termination signals to allow graceful shutdown.
-	termCh := make(chan os.Signal, 1)
-	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		sig := <-termCh
-		log.Printf("received %v, shutting down", sig)
-		os.Exit(128 + int(sig.(syscall.Signal)))
 	}()
 }

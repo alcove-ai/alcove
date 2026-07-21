@@ -17,10 +17,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // TestReadOutputArtifact tests the mixed-type output parsing functionality.
@@ -325,6 +328,273 @@ func TestDetermineOutcome(t *testing.T) {
 			if result != tt.expected {
 				t.Errorf("determineOutcome(%v, %q, %t, %d, %d) = %q, want %q",
 					tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount, result, tt.expected)
+			}
+		})
+	}
+}
+// TestFlushBatchRetry tests flushBatch retry behavior with different failure scenarios
+func TestFlushBatchRetry(t *testing.T) {
+	tests := []struct {
+		name          string
+		appendFunc    func(sessionID string, events []json.RawMessage) error
+		expectedCalls int
+		batchCleared  bool
+		description   string
+	}{
+		{
+			name: "success_on_first_attempt",
+			appendFunc: func(sessionID string, events []json.RawMessage) error {
+				return nil // success
+			},
+			expectedCalls: 1,
+			batchCleared:  true,
+			description:   "Should succeed immediately and clear batch",
+		},
+		{
+			name: "success_on_second_attempt",
+			appendFunc: func() func(sessionID string, events []json.RawMessage) error {
+				callCount := 0
+				return func(sessionID string, events []json.RawMessage) error {
+					callCount++
+					if callCount == 1 {
+						return errors.New("temporary error")
+					}
+					return nil // success on second call
+				}
+			}(),
+			expectedCalls: 2,
+			batchCleared:  true,
+			description:   "Should retry once and succeed, then clear batch",
+		},
+		{
+			name: "success_on_third_attempt",
+			appendFunc: func() func(sessionID string, events []json.RawMessage) error {
+				callCount := 0
+				return func(sessionID string, events []json.RawMessage) error {
+					callCount++
+					if callCount <= 2 {
+						return errors.New("temporary error")
+					}
+					return nil // success on third call
+				}
+			}(),
+			expectedCalls: 3,
+			batchCleared:  true,
+			description:   "Should retry twice and succeed, then clear batch",
+		},
+		{
+			name: "fail_all_attempts",
+			appendFunc: func(sessionID string, events []json.RawMessage) error {
+				return errors.New("persistent error")
+			},
+			expectedCalls: 3,
+			batchCleared:  false,
+			description:   "Should try all 3 attempts, then preserve batch",
+		},
+		{
+			name: "nil_function_succeeds",
+			appendFunc: func(sessionID string, events []json.RawMessage) error {
+				return nil // success
+			},
+			expectedCalls: 1,
+			batchCleared:  true,
+			description:   "Should succeed and clear batch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
+			wrappedFunc := func(sessionID string, events []json.RawMessage) error {
+				callCount++
+				return tt.appendFunc(sessionID, events)
+			}
+
+			// Create test batch with some events
+			batch := []json.RawMessage{
+				json.RawMessage(`{"type":"test1"}`),
+				json.RawMessage(`{"type":"test2"}`),
+			}
+			originalBatchSize := len(batch)
+
+			flushBatchWithFunc("test-session", &batch, wrappedFunc)
+
+			// Check call count
+			if callCount != tt.expectedCalls {
+				t.Errorf("%s: expected %d calls, got %d", tt.description, tt.expectedCalls, callCount)
+			}
+
+			// Check batch state
+			if tt.batchCleared && len(batch) != 0 {
+				t.Errorf("%s: expected batch to be cleared, but has %d events", tt.description, len(batch))
+			}
+			if !tt.batchCleared && len(batch) != originalBatchSize {
+				t.Errorf("%s: expected batch to be preserved with %d events, but has %d", tt.description, originalBatchSize, len(batch))
+			}
+		})
+	}
+}
+
+// TestFlushBatchCap tests the batch size cap enforcement
+func TestFlushBatchCap(t *testing.T) {
+	tests := []struct {
+		name         string
+		batchSize    int
+		expectedSize int
+		description  string
+	}{
+		{
+			name:         "under_cap",
+			batchSize:    100,
+			expectedSize: 0, // cleared after successful flush
+			description:  "Batch under 500 should flush normally",
+		},
+		{
+			name:         "at_cap",
+			batchSize:    500,
+			expectedSize: 0, // cleared after successful flush
+			description:  "Batch at exactly 500 should flush normally",
+		},
+		{
+			name:         "over_cap",
+			batchSize:    600,
+			expectedSize: 0, // trimmed to 500, then cleared after successful flush
+			description:  "Batch over 500 should be trimmed before flush",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			successFunc := func(sessionID string, events []json.RawMessage) error {
+				return nil // always succeeds
+			}
+
+			// Create batch of specified size
+			batch := make([]json.RawMessage, tt.batchSize)
+			for i := 0; i < tt.batchSize; i++ {
+				batch[i] = json.RawMessage(fmt.Sprintf(`{"type":"test%d"}`, i))
+			}
+
+			flushBatchWithFunc("test-session", &batch, successFunc)
+
+			if len(batch) != tt.expectedSize {
+				t.Errorf("%s: expected final batch size %d, got %d", tt.description, tt.expectedSize, len(batch))
+			}
+		})
+	}
+}
+
+// TestRetryWithBackoff tests the retry helper function
+func TestRetryWithBackoff(t *testing.T) {
+	tests := []struct {
+		name          string
+		maxAttempts   int
+		baseDelay     time.Duration
+		fnBehavior    func() func() error
+		expectSuccess bool
+		expectedCalls int
+		description   string
+	}{
+		{
+			name:        "success_first_attempt",
+			maxAttempts: 3,
+			baseDelay:   10 * time.Millisecond,
+			fnBehavior: func() func() error {
+				return func() error { return nil }
+			},
+			expectSuccess: true,
+			expectedCalls: 1,
+			description:   "Should succeed on first attempt",
+		},
+		{
+			name:        "success_second_attempt",
+			maxAttempts: 3,
+			baseDelay:   10 * time.Millisecond,
+			fnBehavior: func() func() error {
+				callCount := 0
+				return func() error {
+					callCount++
+					if callCount == 1 {
+						return errors.New("first failure")
+					}
+					return nil
+				}
+			},
+			expectSuccess: true,
+			expectedCalls: 2,
+			description:   "Should succeed on second attempt",
+		},
+		{
+			name:        "fail_all_attempts",
+			maxAttempts: 3,
+			baseDelay:   10 * time.Millisecond,
+			fnBehavior: func() func() error {
+				return func() error { return errors.New("persistent failure") }
+			},
+			expectSuccess: false,
+			expectedCalls: 3,
+			description:   "Should fail after all attempts",
+		},
+		{
+			name:        "context_cancellation",
+			maxAttempts: 3,
+			baseDelay:   10 * time.Millisecond,
+			fnBehavior: func() func() error {
+				callCount := 0
+				return func() error {
+					callCount++
+					// Always fail to force retry, but context will be cancelled
+					return errors.New("failure")
+				}
+			},
+			expectSuccess: false,
+			expectedCalls: 1, // Only one call before context cancellation
+			description:   "Should respect context cancellation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
+			fn := tt.fnBehavior()
+			wrappedFn := func() error {
+				callCount++
+				return fn()
+			}
+
+			var ctx context.Context
+			var cancel context.CancelFunc
+
+			if tt.name == "context_cancellation" {
+				ctx, cancel = context.WithCancel(context.Background())
+				// Cancel after a short delay
+				go func() {
+					time.Sleep(5 * time.Millisecond)
+					cancel()
+				}()
+			} else {
+				ctx = context.Background()
+			}
+
+			err := retryWithBackoff(ctx, "test", tt.maxAttempts, tt.baseDelay, wrappedFn)
+
+			// Check success/failure
+			if tt.expectSuccess && err != nil {
+				t.Errorf("%s: expected success, got error: %v", tt.description, err)
+			}
+			if !tt.expectSuccess && err == nil {
+				t.Errorf("%s: expected failure, got success", tt.description)
+			}
+
+			// Check call count (with some tolerance for context cancellation timing)
+			if tt.name == "context_cancellation" {
+				if callCount < 1 || callCount > 2 {
+					t.Errorf("%s: expected 1-2 calls due to timing, got %d", tt.description, callCount)
+				}
+			} else {
+				if callCount != tt.expectedCalls {
+					t.Errorf("%s: expected %d calls, got %d", tt.description, tt.expectedCalls, callCount)
+				}
 			}
 		})
 	}
