@@ -906,21 +906,7 @@ func (d *Dispatcher) ListenForStatusUpdates(ctx context.Context) error {
 			// Uses a detached context so cleanup completes even if the
 			// parent context is cancelled (e.g., during Bridge shutdown).
 			if hasHandle {
-				go func(taskID, sessionID string) {
-					time.Sleep(5 * time.Second)
-					gateName := runtime.GateContainerName(taskID)
-					log.Printf("cleanup: stopping gate sidecar %s for completed session %s", gateName, sessionID)
-					cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
-						log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
-					}
-					// Clean up dev container and workspace volume (no-op if not present).
-					devName := runtime.DevContainerName(taskID)
-					if err := d.rt.StopService(cleanupCtx, devName); err != nil {
-						log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
-					}
-				}(handle.ID, update.SessionID)
+				d.cleanupContainers(handle.ID, update.SessionID)
 			}
 
 			// Notify workflow engine of step completion
@@ -938,6 +924,26 @@ func (d *Dispatcher) ListenForStatusUpdates(ctx context.Context) error {
 	})
 
 	return err
+}
+
+// cleanupContainers stops Gate and dev container sidecars after a session
+// completes. Matches the NATS handler cleanup pattern (lines 907-921).
+// Runs asynchronously with a 5s grace period for in-flight logs.
+func (d *Dispatcher) cleanupContainers(taskID, sessionID string) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		gateName := runtime.GateContainerName(taskID)
+		log.Printf("cleanup: stopping gate sidecar %s for completed session %s", gateName, sessionID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
+			log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
+		}
+		devName := runtime.DevContainerName(taskID)
+		if err := d.rt.StopService(cleanupCtx, devName); err != nil {
+			log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
+		}
+	}()
 }
 
 // insertSession writes a new session record to the Ledger (PostgreSQL).
@@ -1044,7 +1050,12 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 				continue
 			}
 
-			// Second sighting (30s grace period elapsed) — proceed with marking
+			if time.Since(firstSeen) < 30*time.Second {
+				// Grace period not yet elapsed — skip this cycle
+				continue
+			}
+
+			// Grace period elapsed — proceed with marking
 			d.mu.Lock()
 			delete(d.firstSeenExited, sessionID)
 			d.mu.Unlock()
@@ -1070,21 +1081,7 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 			}
 
 			// Step 3: Add StopService cleanup after reconciler marks session terminal
-			go func(taskID, sessionID string) {
-				time.Sleep(5 * time.Second)
-				gateName := runtime.GateContainerName(taskID)
-				log.Printf("cleanup: stopping gate sidecar %s for completed session %s", gateName, sessionID)
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
-					log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
-				}
-				// Clean up dev container and workspace volume (no-op if not present).
-				devName := runtime.DevContainerName(taskID)
-				if err := d.rt.StopService(cleanupCtx, devName); err != nil {
-					log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
-				}
-			}(handle.ID, sessionID)
+			d.cleanupContainers(handle.ID, sessionID)
 
 			orphaned++
 			log.Printf("reconcile: marked orphaned session %s as %s (container gone, grace period elapsed since %s)", sessionID, outcome, firstSeen.Round(time.Second))
@@ -1106,7 +1103,12 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 				continue
 			}
 
-			// Second sighting (30s grace period elapsed) — proceed with marking
+			if time.Since(firstSeen) < 30*time.Second {
+				// Grace period not yet elapsed — skip this cycle
+				continue
+			}
+
+			// Grace period elapsed — proceed with marking
 			d.mu.Lock()
 			delete(d.firstSeenExited, sessionID)
 			d.mu.Unlock()
@@ -1132,21 +1134,7 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 			}
 
 			// Step 3: Add StopService cleanup after reconciler marks session terminal
-			go func(taskID, sessionID string) {
-				time.Sleep(5 * time.Second)
-				gateName := runtime.GateContainerName(taskID)
-				log.Printf("cleanup: stopping gate sidecar %s for completed session %s", gateName, sessionID)
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
-					log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
-				}
-				// Clean up dev container and workspace volume (no-op if not present).
-				devName := runtime.DevContainerName(taskID)
-				if err := d.rt.StopService(cleanupCtx, devName); err != nil {
-					log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
-				}
-			}(handle.ID, sessionID)
+			d.cleanupContainers(handle.ID, sessionID)
 
 			orphaned++
 			log.Printf("reconcile: marked exited session %s as %s (grace period elapsed since %s)", sessionID, outcome, firstSeen.Round(time.Second))
@@ -1178,21 +1166,7 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 						}
 
 						// Step 3: Add StopService cleanup for timeout path too
-						go func(taskID, sessionID string) {
-							time.Sleep(5 * time.Second)
-							gateName := runtime.GateContainerName(taskID)
-							log.Printf("cleanup: stopping gate sidecar %s for timed out session %s", gateName, sessionID)
-							cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-							defer cancel()
-							if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
-								log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
-							}
-							// Clean up dev container and workspace volume (no-op if not present).
-							devName := runtime.DevContainerName(taskID)
-							if err := d.rt.StopService(cleanupCtx, devName); err != nil {
-								log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
-							}
-						}(handle.ID, sessionID)
+						d.cleanupContainers(handle.ID, sessionID)
 
 						orphaned++
 						log.Printf("reconcile: timed out session %s (started %s ago, timeout %0.fs)", sessionID, time.Since(startedAt).Round(time.Second), timeoutSeconds)
