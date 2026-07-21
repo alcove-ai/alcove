@@ -49,6 +49,7 @@ type Dispatcher struct {
 	catalogStore    *CatalogItemStore
 	mu              sync.Mutex
 	handles         map[string]runtime.TaskHandle // sessionID -> handle
+	firstSeenExited map[string]time.Time          // sessionID -> timestamp of first sighting (for grace period)
 	ciGate          *CIGateMonitor
 	workflowEngine  *WorkflowEngine
 }
@@ -67,6 +68,7 @@ func NewDispatcher(nc *nats.Conn, db *pgxpool.Pool, rt runtime.Runtime, cfg *Con
 		policyRuleStore: policyRuleStore,
 		catalogStore:    NewCatalogItemStore(db),
 		handles:         make(map[string]runtime.TaskHandle),
+		firstSeenExited: make(map[string]time.Time),
 	}
 }
 
@@ -996,11 +998,15 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 	defer rows.Close()
 
 	var recovered, orphaned int
+	seenThisCycle := make(map[string]bool) // Track sessions seen this cycle for cleanup
+
 	for rows.Next() {
 		var sessionID, taskID string
 		if err := rows.Scan(&sessionID, &taskID); err != nil {
 			continue
 		}
+
+		seenThisCycle[sessionID] = true
 
 		// Check if the container/job still exists via Runtime.
 		handle := runtime.TaskHandle{ID: taskID}
@@ -1024,28 +1030,126 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 		}
 
 		if err != nil || status == "not_found" {
-			// Container is gone — check transcript_event_count to determine outcome.
+			// Check grace period for container-gone sessions.
+			d.mu.Lock()
+			firstSeen, exists := d.firstSeenExited[sessionID]
+			d.mu.Unlock()
+
+			if !exists {
+				// First sighting — record timestamp and skip
+				d.mu.Lock()
+				d.firstSeenExited[sessionID] = time.Now()
+				d.mu.Unlock()
+				log.Printf("reconcile: session %s container exited, waiting for in-flight flushes", sessionID)
+				continue
+			}
+
+			// Second sighting (30s grace period elapsed) — proceed with marking
+			d.mu.Lock()
+			delete(d.firstSeenExited, sessionID)
+			d.mu.Unlock()
+
 			now := time.Now().UTC()
 			outcome := d.determineOrphanedSessionOutcome(ctx, sessionID)
 			d.updateSessionStatus(ctx, sessionID, outcome, nil, &now)
+
+			// Step 4: Add zero-transcript alert for long sessions
+			if outcome == "error" {
+				var startedAt time.Time
+				err := d.db.QueryRow(ctx,
+					`SELECT started_at FROM sessions WHERE id = $1`,
+					sessionID).Scan(&startedAt)
+				if err == nil && time.Since(startedAt) > 60*time.Second {
+					log.Printf("ALERT: reconciler completed session %s with zero transcript events after %s",
+						sessionID, time.Since(startedAt).Round(time.Second))
+				}
+			}
+
 			if d.workflowEngine != nil {
 				d.workflowEngine.OnStepCompletion(ctx, sessionID, outcome, nil)
 			}
+
+			// Step 3: Add StopService cleanup after reconciler marks session terminal
+			go func(taskID, sessionID string) {
+				time.Sleep(5 * time.Second)
+				gateName := runtime.GateContainerName(taskID)
+				log.Printf("cleanup: stopping gate sidecar %s for completed session %s", gateName, sessionID)
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
+					log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
+				}
+				// Clean up dev container and workspace volume (no-op if not present).
+				devName := runtime.DevContainerName(taskID)
+				if err := d.rt.StopService(cleanupCtx, devName); err != nil {
+					log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
+				}
+			}(handle.ID, sessionID)
+
 			orphaned++
-			log.Printf("reconcile: marked orphaned session %s as %s (container gone)", sessionID, outcome)
+			log.Printf("reconcile: marked orphaned session %s as %s (container gone, grace period elapsed since %s)", sessionID, outcome, firstSeen.Round(time.Second))
 			continue
 		}
 
 		if status == "exited" || status == "stopped" {
-			// Container exited or stopped — check transcript_event_count to determine outcome.
+			// Check grace period for exited sessions.
+			d.mu.Lock()
+			firstSeen, exists := d.firstSeenExited[sessionID]
+			d.mu.Unlock()
+
+			if !exists {
+				// First sighting — record timestamp and skip
+				d.mu.Lock()
+				d.firstSeenExited[sessionID] = time.Now()
+				d.mu.Unlock()
+				log.Printf("reconcile: session %s container exited, waiting for in-flight flushes", sessionID)
+				continue
+			}
+
+			// Second sighting (30s grace period elapsed) — proceed with marking
+			d.mu.Lock()
+			delete(d.firstSeenExited, sessionID)
+			d.mu.Unlock()
+
 			now := time.Now().UTC()
 			outcome := d.determineOrphanedSessionOutcome(ctx, sessionID)
 			d.updateSessionStatus(ctx, sessionID, outcome, nil, &now)
+
+			// Step 4: Add zero-transcript alert for long sessions
+			if outcome == "error" {
+				var startedAt time.Time
+				err := d.db.QueryRow(ctx,
+					`SELECT started_at FROM sessions WHERE id = $1`,
+					sessionID).Scan(&startedAt)
+				if err == nil && time.Since(startedAt) > 60*time.Second {
+					log.Printf("ALERT: reconciler completed session %s with zero transcript events after %s",
+						sessionID, time.Since(startedAt).Round(time.Second))
+				}
+			}
+
 			if d.workflowEngine != nil {
 				d.workflowEngine.OnStepCompletion(ctx, sessionID, outcome, nil)
 			}
+
+			// Step 3: Add StopService cleanup after reconciler marks session terminal
+			go func(taskID, sessionID string) {
+				time.Sleep(5 * time.Second)
+				gateName := runtime.GateContainerName(taskID)
+				log.Printf("cleanup: stopping gate sidecar %s for completed session %s", gateName, sessionID)
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
+					log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
+				}
+				// Clean up dev container and workspace volume (no-op if not present).
+				devName := runtime.DevContainerName(taskID)
+				if err := d.rt.StopService(cleanupCtx, devName); err != nil {
+					log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
+				}
+			}(handle.ID, sessionID)
+
 			orphaned++
-			log.Printf("reconcile: marked exited session %s as %s", sessionID, outcome)
+			log.Printf("reconcile: marked exited session %s as %s (grace period elapsed since %s)", sessionID, outcome, firstSeen.Round(time.Second))
 			continue
 		}
 
@@ -1072,6 +1176,24 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 						if d.workflowEngine != nil {
 							d.workflowEngine.OnStepCompletion(ctx, sessionID, "timeout", nil)
 						}
+
+						// Step 3: Add StopService cleanup for timeout path too
+						go func(taskID, sessionID string) {
+							time.Sleep(5 * time.Second)
+							gateName := runtime.GateContainerName(taskID)
+							log.Printf("cleanup: stopping gate sidecar %s for timed out session %s", gateName, sessionID)
+							cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+							defer cancel()
+							if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
+								log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
+							}
+							// Clean up dev container and workspace volume (no-op if not present).
+							devName := runtime.DevContainerName(taskID)
+							if err := d.rt.StopService(cleanupCtx, devName); err != nil {
+								log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
+							}
+						}(handle.ID, sessionID)
+
 						orphaned++
 						log.Printf("reconcile: timed out session %s (started %s ago, timeout %0.fs)", sessionID, time.Since(startedAt).Round(time.Second), timeoutSeconds)
 						continue
@@ -1086,6 +1208,15 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 		d.mu.Unlock()
 		recovered++
 	}
+
+	// Step 5: Clean up stale entries from firstSeenExited map
+	d.mu.Lock()
+	for sid := range d.firstSeenExited {
+		if !seenThisCycle[sid] {
+			delete(d.firstSeenExited, sid)
+		}
+	}
+	d.mu.Unlock()
 
 	if recovered > 0 || orphaned > 0 {
 		log.Printf("reconcile: recovered %d running session(s), cleaned up %d orphaned session(s)", recovered, orphaned)
