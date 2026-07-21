@@ -351,6 +351,7 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 
 	// Build the Job spec.
 	backoffLimit := int32(0)
+	gracePeriod := int64(60)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -364,10 +365,11 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					InitContainers: initContainers,
-					Containers:     []corev1.Container{skiffContainer},
-					Volumes:        devVolumes,
-					RestartPolicy:  corev1.RestartPolicyNever,
+					TerminationGracePeriodSeconds: &gracePeriod,
+					InitContainers:                initContainers,
+					Containers:                    []corev1.Container{skiffContainer},
+					Volumes:                       devVolumes,
+					RestartPolicy:                 corev1.RestartPolicyNever,
 				},
 			},
 		},
@@ -375,7 +377,8 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 
 	// Set activeDeadlineSeconds from the task timeout.
 	if spec.Timeout > 0 {
-		job.Spec.ActiveDeadlineSeconds = &spec.Timeout
+		padded := spec.Timeout + 60 // Grace period for transcript flush after internal timeout
+		job.Spec.ActiveDeadlineSeconds = &padded
 	}
 
 	// Set TTL cleanup: 5 minutes after completion, unless in debug mode.
