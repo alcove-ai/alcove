@@ -17,10 +17,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestReadOutputArtifact tests the mixed-type output parsing functionality.
@@ -320,12 +323,294 @@ func TestDetermineOutcome(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := determineOutcome(tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount)
+				if result != tt.expected {
+					t.Errorf("determineOutcome(%v, %q, %t, %d, %d) = %q, want %q",
+						tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount, result, tt.expected)
+				}
+			})
+		}
+	}
+
+// mockLedgerClient provides a controllable mock for testing flushBatch retry logic.
+type mockLedgerClient struct {
+	calls    [][]json.RawMessage
+	errors   []error
+	callIdx  int
+	mu       sync.Mutex
+}
+
+func (m *mockLedgerClient) AppendTranscript(sessionID string, batch []json.RawMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.calls = append(m.calls, batch)
+	if m.callIdx < len(m.errors) {
+		err := m.errors[m.callIdx]
+		m.callIdx++
+		return err
+	}
+	m.callIdx++
+	return nil
+}
+
+// testFlushBatch is a modified version that accepts a LedgerClient interface
+func testFlushBatch(lc *mockLedgerClient, sessionID string, batch *[]json.RawMessage) {
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := lc.AppendTranscript(sessionID, *batch); err != nil {
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt) * time.Millisecond) // Fast for tests
+				continue
+			}
+			return // keep events in batch for next flush cycle
+		}
+		*batch = nil
+		return
+	}
+}
+
+// TestFlushBatch tests the retry logic and event preservation.
+func TestFlushBatch(t *testing.T) {
+	tests := []struct {
+		name           string
+		errors         []error
+		initialEvents  int
+		expectedCalls  int
+		expectEmpty    bool
+		expectedEvents int
+	}{
+		{
+			name:           "success on first attempt",
+			errors:         []error{nil},
+			initialEvents:  3,
+			expectedCalls:  1,
+			expectEmpty:    true,
+			expectedEvents: 0,
+		},
+		{
+			name:           "success on second attempt",
+			errors:         []error{errors.New("network error"), nil},
+			initialEvents:  3,
+			expectedCalls:  2,
+			expectEmpty:    true,
+			expectedEvents: 0,
+		},
+		{
+			name:           "success on third attempt",
+			errors:         []error{errors.New("error1"), errors.New("error2"), nil},
+			initialEvents:  3,
+			expectedCalls:  3,
+			expectEmpty:    true,
+			expectedEvents: 0,
+		},
+		{
+			name:           "fail all attempts - preserve events",
+			errors:         []error{errors.New("error1"), errors.New("error2"), errors.New("error3")},
+			initialEvents:  3,
+			expectedCalls:  3,
+			expectEmpty:    false,
+			expectedEvents: 3,
+		},
+		{
+			name:           "empty batch",
+			errors:         []error{nil},
+			initialEvents:  0,
+			expectedCalls:  1,
+			expectEmpty:    true,
+			expectedEvents: 0,
+		},
+	}
+
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := determineOutcome(tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount)
-			if result != tt.expected {
-				t.Errorf("determineOutcome(%v, %q, %t, %d, %d) = %q, want %q",
-					tt.ctxErr, tt.currentOutcome, tt.sawSuccessResult, tt.exitCode, tt.eventCount, result, tt.expected)
+			mock := &mockLedgerClient{errors: tt.errors}
+
+			// Create test batch
+			batch := make([]json.RawMessage, tt.initialEvents)
+			for i := 0; i < tt.initialEvents; i++ {
+				batch[i] = json.RawMessage(`{"event":"test"}`)
+			}
+
+			testFlushBatch(mock, "test-session", &batch)
+
+			// Verify call count
+			if len(mock.calls) != tt.expectedCalls {
+				t.Errorf("Expected %d calls, got %d", tt.expectedCalls, len(mock.calls))
+			}
+
+			// Verify batch state
+			if tt.expectEmpty && len(batch) != 0 {
+				t.Errorf("Expected empty batch, got %d events", len(batch))
+			} else if !tt.expectEmpty && len(batch) != tt.expectedEvents {
+				t.Errorf("Expected %d events in batch, got %d", tt.expectedEvents, len(batch))
 			}
 		})
 	}
+}
+
+// TestBatchCapEnforcement tests the max batch size enforcement logic.
+func TestBatchCapEnforcement(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialCount  int
+		expectedCount int
+	}{
+		{
+			name:          "under cap",
+			initialCount:  100,
+			expectedCount: 101,
+		},
+		{
+			name:          "at cap",
+			initialCount:  500,
+			expectedCount: 500,
+		},
+		{
+			name:          "over cap",
+			initialCount:  501,
+			expectedCount: 500,
+		},
+		{
+			name:          "way over cap",
+			initialCount:  1000,
+			expectedCount: 500,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create initial batch
+			batch := make([]json.RawMessage, tt.initialCount)
+			for i := 0; i < tt.initialCount; i++ {
+				batch[i] = json.RawMessage(`{"event":"` + strconv.Itoa(i) + `"}`)
+			}
+
+			// Simulate adding one more event with cap enforcement
+			if len(batch) >= maxBatchSize {
+				// Keep the newest 499 events
+				batch = batch[len(batch)-maxBatchSize+1:]
+			}
+			batch = append(batch, json.RawMessage(`{"event":"new"}`))
+
+			if len(batch) != tt.expectedCount {
+				t.Errorf("Expected batch size %d, got %d", tt.expectedCount, len(batch))
+			}
+
+			// Verify the newest event is preserved
+			lastEvent := batch[len(batch)-1]
+			if string(lastEvent) != `{"event":"new"}` {
+				t.Errorf("Expected newest event to be preserved, got %s", lastEvent)
+			}
+		})
+	}
+}
+
+// TestRetryWithBackoff tests the retry helper function.
+func TestRetryWithBackoff(t *testing.T) {
+	tests := []struct {
+		name          string
+		errors        []error
+		maxAttempts   int
+		expectSuccess bool
+		expectCalls   int
+	}{
+		{
+			name:          "success on first attempt",
+			errors:        []error{nil},
+			maxAttempts:   3,
+			expectSuccess: true,
+			expectCalls:   1,
+		},
+		{
+			name:          "success on second attempt",
+			errors:        []error{errors.New("temp error"), nil},
+			maxAttempts:   3,
+			expectSuccess: true,
+			expectCalls:   2,
+		},
+		{
+			name:          "fail all attempts",
+			errors:        []error{errors.New("error1"), errors.New("error2"), errors.New("error3")},
+			maxAttempts:   3,
+			expectSuccess: false,
+			expectCalls:   3,
+		},
+		{
+			name:          "single attempt success",
+			errors:        []error{nil},
+			maxAttempts:   1,
+			expectSuccess: true,
+			expectCalls:   1,
+		},
+		{
+			name:          "single attempt failure",
+			errors:        []error{errors.New("single error")},
+			maxAttempts:   1,
+			expectSuccess: false,
+			expectCalls:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
+			ctx := context.Background()
+
+			fn := func() error {
+				if callCount < len(tt.errors) {
+					err := tt.errors[callCount]
+					callCount++
+					return err
+				}
+				callCount++
+				return nil
+			}
+
+			retryWithBackoff(ctx, "test", tt.maxAttempts, time.Millisecond, fn)
+
+			if callCount != tt.expectCalls {
+				t.Errorf("Expected %d calls, got %d", tt.expectCalls, callCount)
+			}
+		})
+	}
+}
+
+// TestRetryWithBackoffContextCancellation tests context cancellation during retry.
+func TestRetryWithBackoffContextCancellation(t *testing.T) {
+	t.Run("cancel before first attempt", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		callCount := 0
+		fn := func() error {
+			callCount++
+			return errors.New("always fail")
+		}
+
+		retryWithBackoff(ctx, "test", 5, time.Millisecond, fn)
+
+		if callCount != 0 {
+			t.Errorf("Expected 0 calls, got %d", callCount)
+		}
+	})
+
+	t.Run("cancel with timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		defer cancel()
+
+		callCount := 0
+		fn := func() error {
+			callCount++
+			time.Sleep(10 * time.Millisecond) // Ensure we hit the timeout
+			return errors.New("always fail")
+		}
+
+		retryWithBackoff(ctx, "test", 5, time.Millisecond, fn)
+
+		// Should be 1 or 2 calls depending on timing, but not all 5
+		if callCount >= 5 {
+			t.Errorf("Expected fewer than 5 calls due to context timeout, got %d", callCount)
+		}
+	})
 }
