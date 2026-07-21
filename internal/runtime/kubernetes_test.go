@@ -126,12 +126,12 @@ func TestRunTask_JobSpec(t *testing.T) {
 		t.Errorf("pod task-id label = %q, want %q", podLabels["alcove.dev/task-id"], "task-1")
 	}
 
-	// Verify activeDeadlineSeconds matches timeout.
+	// Verify activeDeadlineSeconds matches timeout + 60 second grace period.
 	if job.Spec.ActiveDeadlineSeconds == nil {
-		t.Fatal("activeDeadlineSeconds is nil, want 3600")
+		t.Fatal("activeDeadlineSeconds is nil, want 3660")
 	}
-	if *job.Spec.ActiveDeadlineSeconds != 3600 {
-		t.Errorf("activeDeadlineSeconds = %d, want %d", *job.Spec.ActiveDeadlineSeconds, 3600)
+	if *job.Spec.ActiveDeadlineSeconds != 3660 {
+		t.Errorf("activeDeadlineSeconds = %d, want %d", *job.Spec.ActiveDeadlineSeconds, 3660)
 	}
 
 	// Verify ttlSecondsAfterFinished is set (not debug mode).
@@ -145,6 +145,14 @@ func TestRunTask_JobSpec(t *testing.T) {
 	// Verify backoff limit is 0 (no retries).
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 {
 		t.Errorf("backoffLimit = %v, want 0", job.Spec.BackoffLimit)
+	}
+
+	// Verify terminationGracePeriodSeconds is set to 60.
+	if job.Spec.Template.Spec.TerminationGracePeriodSeconds == nil {
+		t.Fatal("terminationGracePeriodSeconds is nil, want 60")
+	}
+	if *job.Spec.Template.Spec.TerminationGracePeriodSeconds != 60 {
+		t.Errorf("terminationGracePeriodSeconds = %d, want %d", *job.Spec.Template.Spec.TerminationGracePeriodSeconds, 60)
 	}
 
 	// Verify pod restart policy.
@@ -352,6 +360,14 @@ func TestRunTask_NoTimeout(t *testing.T) {
 	// With zero timeout, activeDeadlineSeconds should not be set.
 	if job.Spec.ActiveDeadlineSeconds != nil {
 		t.Errorf("activeDeadlineSeconds should be nil with zero timeout, got %d", *job.Spec.ActiveDeadlineSeconds)
+	}
+
+	// terminationGracePeriodSeconds should always be set to 60, regardless of timeout.
+	if job.Spec.Template.Spec.TerminationGracePeriodSeconds == nil {
+		t.Fatal("terminationGracePeriodSeconds is nil, want 60")
+	}
+	if *job.Spec.Template.Spec.TerminationGracePeriodSeconds != 60 {
+		t.Errorf("terminationGracePeriodSeconds = %d, want 60", *job.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	}
 }
 
@@ -877,8 +893,8 @@ func TestRunTask_DebugModeStillSetsActiveDeadline(t *testing.T) {
 	if job.Spec.TTLSecondsAfterFinished != nil {
 		t.Errorf("ttlSecondsAfterFinished should be nil in debug mode, got %d", *job.Spec.TTLSecondsAfterFinished)
 	}
-	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 7200 {
-		t.Errorf("activeDeadlineSeconds = %v, want 7200 (debug mode should not affect timeout)", job.Spec.ActiveDeadlineSeconds)
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 7260 {
+		t.Errorf("activeDeadlineSeconds = %v, want 7260 (debug mode should not affect timeout + grace period)", job.Spec.ActiveDeadlineSeconds)
 	}
 }
 
