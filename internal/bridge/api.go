@@ -382,17 +382,39 @@ func (a *API) handleGetSession(w http.ResponseWriter, r *http.Request, sessionID
 
 	detail := sessionDetail{Session: *session}
 
-	var transcript, proxyLog, runtimeConfig []byte
+	// Fetch transcript from new transcript_events table with fallback
+	transcriptEvents, err := a.readTranscriptEvents(r.Context(), sessionID)
+	if err != nil {
+		log.Printf("warning: failed to read transcript events for session detail %s: %v", sessionID, err)
+		transcriptEvents = []json.RawMessage{}
+	}
+
+	// Fetch proxy log from new proxy_log_events table with fallback
+	proxyLogEvents, err := a.readProxyLogEvents(r.Context(), sessionID)
+	if err != nil {
+		log.Printf("warning: failed to read proxy log events for session detail %s: %v", sessionID, err)
+		proxyLogEvents = []json.RawMessage{}
+	}
+
+	// Fetch runtime config and env snapshot from sessions table
+	var runtimeConfig []byte
 	var envSnapshot *string
 	_ = a.db.QueryRow(r.Context(),
-		`SELECT transcript, proxy_log, runtime_config, env_snapshot FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&transcript, &proxyLog, &runtimeConfig, &envSnapshot)
+		`SELECT runtime_config, env_snapshot FROM sessions WHERE id = $1`, sessionID,
+	).Scan(&runtimeConfig, &envSnapshot)
 
-	if transcript != nil {
-		detail.Transcript = transcript
+	// Convert events slices to JSON for response
+	if len(transcriptEvents) > 0 {
+		transcript, err := json.Marshal(transcriptEvents)
+		if err == nil {
+			detail.Transcript = transcript
+		}
 	}
-	if proxyLog != nil {
-		detail.ProxyLog = proxyLog
+	if len(proxyLogEvents) > 0 {
+		proxyLog, err := json.Marshal(proxyLogEvents)
+		if err == nil {
+			detail.ProxyLog = proxyLog
+		}
 	}
 	if runtimeConfig != nil {
 		detail.RuntimeConfig = runtimeConfig
@@ -578,19 +600,24 @@ func (a *API) handleTranscript(w http.ResponseWriter, r *http.Request, sessionID
 		return
 	}
 
-	// Static transcript fetch.
-	var transcript json.RawMessage
-	err := a.db.QueryRow(r.Context(),
-		`SELECT transcript FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&transcript)
+	// Static transcript fetch using new transcript_events table with fallback.
+	events, err := a.readTranscriptEvents(r.Context(), sessionID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "session or transcript not found")
+		log.Printf("error: reading transcript events for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to read transcript")
+		return
+	}
+
+	// Convert events slice back to json.RawMessage for response
+	transcript, err := json.Marshal(events)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to marshal transcript")
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"session_id": sessionID,
-		"transcript": transcript,
+		"transcript": json.RawMessage(transcript),
 	})
 }
 
@@ -609,21 +636,18 @@ func (a *API) streamTranscriptSSE(w http.ResponseWriter, r *http.Request, sessio
 	flusher.Flush()
 	log.Printf("sse: streaming transcript for session %s (client: %s)", sessionID, r.RemoteAddr)
 
-	// Phase 1: Catch-up — send persisted events from database
-	var transcript json.RawMessage
-	_ = a.db.QueryRow(r.Context(),
-		`SELECT COALESCE(transcript, '[]'::jsonb) FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&transcript)
-
-	if transcript != nil {
-		var events []json.RawMessage
-		if json.Unmarshal(transcript, &events) == nil {
-			for _, evt := range events {
-				fmt.Fprintf(w, "data: %s\n\n", evt)
-			}
-			flusher.Flush()
-		}
+	// Phase 1: Catch-up — send persisted events from database using new transcript_events table
+	events, err := a.readTranscriptEvents(r.Context(), sessionID)
+	if err != nil {
+		log.Printf("warning: failed to read transcript events for SSE session %s: %v", sessionID, err)
+		// Continue with empty events for graceful degradation
+		events = []json.RawMessage{}
 	}
+
+	for _, evt := range events {
+		fmt.Fprintf(w, "data: %s\n\n", evt)
+	}
+	flusher.Flush()
 
 	// Phase 2: Subscribe to live NATS transcript events
 	sub, err := a.dispatcher.nc.Subscribe(
@@ -710,14 +734,23 @@ func (a *API) handleAppendTranscript(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 
-	// Atomic JSONB append and count increment — no read-modify-write race.
-	_, err = a.db.Exec(ctx,
-		`UPDATE sessions SET transcript = COALESCE(transcript, '[]'::jsonb) || $1::jsonb,
-		transcript_event_count = COALESCE(transcript_event_count, 0) + $2 WHERE id = $3`,
-		newEventsJSON, len(req.Events), sessionID)
+	// Atomic INSERT into transcript_events and count increment using CTE.
+	// ON CONFLICT DO NOTHING makes retries idempotent for Phase 2's flush retry logic.
+	_, err = a.db.Exec(ctx, `
+		WITH inserted AS (
+			INSERT INTO transcript_events (session_id, batch_index, events)
+			VALUES ($1,
+				(SELECT COALESCE(MAX(batch_index), -1) + 1 FROM transcript_events WHERE session_id = $1),
+				$2::jsonb)
+			ON CONFLICT (session_id, batch_index) DO NOTHING
+			RETURNING id
+		)
+		UPDATE sessions SET transcript_event_count = COALESCE(transcript_event_count, 0) + $3
+		WHERE id = $1 AND EXISTS (SELECT 1 FROM inserted)`,
+		sessionID, newEventsJSON, len(req.Events))
 	if err != nil {
-		log.Printf("error: updating transcript for session %s: %v", sessionID, err)
-		respondError(w, http.StatusInternalServerError, "failed to update transcript")
+		log.Printf("error: inserting transcript events for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to insert transcript events")
 		return
 	}
 
@@ -857,14 +890,23 @@ func (a *API) handleAppendProxyLog(w http.ResponseWriter, r *http.Request, sessi
 		return
 	}
 
-	// Atomic JSONB append and count increment — no read-modify-write race.
-	_, err = a.db.Exec(ctx,
-		`UPDATE sessions SET proxy_log = COALESCE(proxy_log, '[]'::jsonb) || $1::jsonb,
-		proxy_event_count = COALESCE(proxy_event_count, 0) + $2 WHERE id = $3`,
-		newEntriesJSON, len(req.Entries), sessionID)
+	// Atomic INSERT into proxy_log_events and count increment using CTE.
+	// ON CONFLICT DO NOTHING makes retries idempotent for Phase 2's flush retry logic.
+	_, err = a.db.Exec(ctx, `
+		WITH inserted AS (
+			INSERT INTO proxy_log_events (session_id, batch_index, events)
+			VALUES ($1,
+				(SELECT COALESCE(MAX(batch_index), -1) + 1 FROM proxy_log_events WHERE session_id = $1),
+				$2::jsonb)
+			ON CONFLICT (session_id, batch_index) DO NOTHING
+			RETURNING id
+		)
+		UPDATE sessions SET proxy_event_count = COALESCE(proxy_event_count, 0) + $3
+		WHERE id = $1 AND EXISTS (SELECT 1 FROM inserted)`,
+		sessionID, newEntriesJSON, len(req.Entries))
 	if err != nil {
-		log.Printf("error: updating proxy log for session %s: %v", sessionID, err)
-		respondError(w, http.StatusInternalServerError, "failed to update proxy log")
+		log.Printf("error: inserting proxy log events for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to insert proxy log events")
 		return
 	}
 
@@ -877,18 +919,24 @@ func (a *API) handleGetProxyLog(w http.ResponseWriter, r *http.Request, sessionI
 		return
 	}
 
-	var proxyLog json.RawMessage
-	err := a.db.QueryRow(r.Context(),
-		`SELECT COALESCE(proxy_log, '[]'::jsonb) FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&proxyLog)
+	// Fetch proxy log from new proxy_log_events table with fallback
+	events, err := a.readProxyLogEvents(r.Context(), sessionID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "session or proxy log not found")
+		log.Printf("error: reading proxy log events for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to read proxy log")
+		return
+	}
+
+	// Convert events slice back to json.RawMessage for response
+	proxyLog, err := json.Marshal(events)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to marshal proxy log")
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"session_id": sessionID,
-		"proxy_log":  proxyLog,
+		"proxy_log":  json.RawMessage(proxyLog),
 	})
 }
 
@@ -3044,4 +3092,122 @@ func (a *API) calculateStepPosition(ctx context.Context, workflowRunID, workflow
 	}
 
 	return fmt.Sprintf("%d of %d", position, totalSteps)
+}
+
+// readTranscriptEvents reads transcript events from the transcript_events table
+// with fallback to the legacy sessions.transcript column for backward compatibility.
+func (a *API) readTranscriptEvents(ctx context.Context, sessionID string) ([]json.RawMessage, error) {
+	// First try to read from transcript_events table
+	rows, err := a.db.Query(ctx,
+		`SELECT events FROM transcript_events WHERE session_id = $1 ORDER BY batch_index`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("querying transcript_events: %w", err)
+	}
+	defer rows.Close()
+
+	var allEvents []json.RawMessage
+	hasData := false
+
+	for rows.Next() {
+		hasData = true
+		var batchEvents json.RawMessage
+		if err := rows.Scan(&batchEvents); err != nil {
+			return nil, fmt.Errorf("scanning batch events: %w", err)
+		}
+
+		// Each batch is a JSON array, so we need to unmarshal and append individual events
+		var events []json.RawMessage
+		if err := json.Unmarshal(batchEvents, &events); err != nil {
+			return nil, fmt.Errorf("unmarshaling batch events: %w", err)
+		}
+
+		allEvents = append(allEvents, events...)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating transcript_events: %w", err)
+	}
+
+	// If we found data in the new table, return it
+	if hasData {
+		return allEvents, nil
+	}
+
+	// Fallback to legacy sessions.transcript column
+	var transcript json.RawMessage
+	err = a.db.QueryRow(ctx,
+		`SELECT transcript FROM sessions WHERE id = $1`, sessionID).Scan(&transcript)
+	if err != nil {
+		return nil, fmt.Errorf("querying legacy transcript: %w", err)
+	}
+
+	if transcript == nil {
+		return []json.RawMessage{}, nil
+	}
+
+	var events []json.RawMessage
+	if err := json.Unmarshal(transcript, &events); err != nil {
+		return nil, fmt.Errorf("unmarshaling legacy transcript: %w", err)
+	}
+
+	return events, nil
+}
+
+// readProxyLogEvents reads proxy log events from the proxy_log_events table
+// with fallback to the legacy sessions.proxy_log column for backward compatibility.
+func (a *API) readProxyLogEvents(ctx context.Context, sessionID string) ([]json.RawMessage, error) {
+	// First try to read from proxy_log_events table
+	rows, err := a.db.Query(ctx,
+		`SELECT events FROM proxy_log_events WHERE session_id = $1 ORDER BY batch_index`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("querying proxy_log_events: %w", err)
+	}
+	defer rows.Close()
+
+	var allEvents []json.RawMessage
+	hasData := false
+
+	for rows.Next() {
+		hasData = true
+		var batchEvents json.RawMessage
+		if err := rows.Scan(&batchEvents); err != nil {
+			return nil, fmt.Errorf("scanning batch events: %w", err)
+		}
+
+		// Each batch is a JSON array, so we need to unmarshal and append individual events
+		var events []json.RawMessage
+		if err := json.Unmarshal(batchEvents, &events); err != nil {
+			return nil, fmt.Errorf("unmarshaling batch events: %w", err)
+		}
+
+		allEvents = append(allEvents, events...)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating proxy_log_events: %w", err)
+	}
+
+	// If we found data in the new table, return it
+	if hasData {
+		return allEvents, nil
+	}
+
+	// Fallback to legacy sessions.proxy_log column
+	var proxyLog json.RawMessage
+	err = a.db.QueryRow(ctx,
+		`SELECT proxy_log FROM sessions WHERE id = $1`, sessionID).Scan(&proxyLog)
+	if err != nil {
+		return nil, fmt.Errorf("querying legacy proxy_log: %w", err)
+	}
+
+	if proxyLog == nil {
+		return []json.RawMessage{}, nil
+	}
+
+	var events []json.RawMessage
+	if err := json.Unmarshal(proxyLog, &events); err != nil {
+		return nil, fmt.Errorf("unmarshaling legacy proxy_log: %w", err)
+	}
+
+	return events, nil
 }
