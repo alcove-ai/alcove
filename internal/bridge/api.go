@@ -382,18 +382,18 @@ func (a *API) handleGetSession(w http.ResponseWriter, r *http.Request, sessionID
 
 	detail := sessionDetail{Session: *session}
 
-	var transcript, proxyLog, runtimeConfig []byte
+	// Fetch transcript and proxy log using merged data (legacy + new table)
+	transcript, _ := a.readEventRows(r.Context(), sessionID, "transcript_events", "transcript")
+	proxyLog, _ := a.readEventRows(r.Context(), sessionID, "proxy_log_events", "proxy_log")
+
+	var runtimeConfig []byte
 	var envSnapshot *string
 	_ = a.db.QueryRow(r.Context(),
-		`SELECT transcript, proxy_log, runtime_config, env_snapshot FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&transcript, &proxyLog, &runtimeConfig, &envSnapshot)
+		`SELECT runtime_config, env_snapshot FROM sessions WHERE id = $1`, sessionID,
+	).Scan(&runtimeConfig, &envSnapshot)
 
-	if transcript != nil {
-		detail.Transcript = transcript
-	}
-	if proxyLog != nil {
-		detail.ProxyLog = proxyLog
-	}
+	detail.Transcript = transcript
+	detail.ProxyLog = proxyLog
 	if runtimeConfig != nil {
 		detail.RuntimeConfig = runtimeConfig
 	}
@@ -578,11 +578,8 @@ func (a *API) handleTranscript(w http.ResponseWriter, r *http.Request, sessionID
 		return
 	}
 
-	// Static transcript fetch.
-	var transcript json.RawMessage
-	err := a.db.QueryRow(r.Context(),
-		`SELECT transcript FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&transcript)
+	// Static transcript fetch using merged data from legacy column and new table.
+	transcript, err := a.readEventRows(r.Context(), sessionID, "transcript_events", "transcript")
 	if err != nil {
 		respondError(w, http.StatusNotFound, "session or transcript not found")
 		return
@@ -609,13 +606,10 @@ func (a *API) streamTranscriptSSE(w http.ResponseWriter, r *http.Request, sessio
 	flusher.Flush()
 	log.Printf("sse: streaming transcript for session %s (client: %s)", sessionID, r.RemoteAddr)
 
-	// Phase 1: Catch-up — send persisted events from database
-	var transcript json.RawMessage
-	_ = a.db.QueryRow(r.Context(),
-		`SELECT COALESCE(transcript, '[]'::jsonb) FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&transcript)
+	// Phase 1: Catch-up — send persisted events from merged data (legacy + new table)
+	transcript, _ := a.readEventRows(r.Context(), sessionID, "transcript_events", "transcript")
 
-	if transcript != nil {
+	if transcript != nil && string(transcript) != "[]" {
 		var events []json.RawMessage
 		if json.Unmarshal(transcript, &events) == nil {
 			for _, evt := range events {
@@ -710,13 +704,54 @@ func (a *API) handleAppendTranscript(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 
-	// Atomic JSONB append and count increment — no read-modify-write race.
-	_, err = a.db.Exec(ctx,
-		`UPDATE sessions SET transcript = COALESCE(transcript, '[]'::jsonb) || $1::jsonb,
-		transcript_event_count = COALESCE(transcript_event_count, 0) + $2 WHERE id = $3`,
-		newEventsJSON, len(req.Events), sessionID)
+	// Explicit transaction with session-level locking to prevent concurrent batch_index races.
+	// Under READ COMMITTED isolation, statements within a transaction see the latest
+	// committed data, so the MAX(batch_index) query sees fresh data after FOR UPDATE.
+	tx, err := a.db.Begin(ctx)
 	if err != nil {
-		log.Printf("error: updating transcript for session %s: %v", sessionID, err)
+		log.Printf("error: beginning transaction for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update transcript")
+		return
+	}
+	defer tx.Rollback(ctx) // Safe to call even after Commit
+
+	// 1. Lock the session row to serialize concurrent writers per session
+	_, err = tx.Exec(ctx, "SELECT id FROM sessions WHERE id = $1 FOR UPDATE", sessionID)
+	if err != nil {
+		log.Printf("error: locking session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update transcript")
+		return
+	}
+
+	// 2. INSERT with MAX+1 — this statement sees latest committed batch_index
+	//    because it's a new statement in the transaction (READ COMMITTED)
+	result, err := tx.Exec(ctx,
+		`INSERT INTO transcript_events (session_id, batch_index, events)
+		 VALUES ($1, (SELECT COALESCE(MAX(batch_index), -1) + 1
+		              FROM transcript_events WHERE session_id = $1), $2::jsonb)
+		 ON CONFLICT (session_id, batch_index) DO NOTHING`,
+		sessionID, newEventsJSON)
+	if err != nil {
+		log.Printf("error: inserting transcript events for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update transcript")
+		return
+	}
+
+	// 3. UPDATE count — only if INSERT actually inserted a row
+	if result.RowsAffected() > 0 {
+		_, err = tx.Exec(ctx,
+			"UPDATE sessions SET transcript_event_count = COALESCE(transcript_event_count, 0) + $1 WHERE id = $2",
+			len(req.Events), sessionID)
+		if err != nil {
+			log.Printf("error: updating transcript count for session %s: %v", sessionID, err)
+			respondError(w, http.StatusInternalServerError, "failed to update transcript")
+			return
+		}
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		log.Printf("error: committing transcript transaction for session %s: %v", sessionID, err)
 		respondError(w, http.StatusInternalServerError, "failed to update transcript")
 		return
 	}
@@ -857,13 +892,54 @@ func (a *API) handleAppendProxyLog(w http.ResponseWriter, r *http.Request, sessi
 		return
 	}
 
-	// Atomic JSONB append and count increment — no read-modify-write race.
-	_, err = a.db.Exec(ctx,
-		`UPDATE sessions SET proxy_log = COALESCE(proxy_log, '[]'::jsonb) || $1::jsonb,
-		proxy_event_count = COALESCE(proxy_event_count, 0) + $2 WHERE id = $3`,
-		newEntriesJSON, len(req.Entries), sessionID)
+	// Explicit transaction with session-level locking to prevent concurrent batch_index races.
+	// Under READ COMMITTED isolation, statements within a transaction see the latest
+	// committed data, so the MAX(batch_index) query sees fresh data after FOR UPDATE.
+	tx, err := a.db.Begin(ctx)
 	if err != nil {
-		log.Printf("error: updating proxy log for session %s: %v", sessionID, err)
+		log.Printf("error: beginning transaction for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update proxy log")
+		return
+	}
+	defer tx.Rollback(ctx) // Safe to call even after Commit
+
+	// 1. Lock the session row to serialize concurrent writers per session
+	_, err = tx.Exec(ctx, "SELECT id FROM sessions WHERE id = $1 FOR UPDATE", sessionID)
+	if err != nil {
+		log.Printf("error: locking session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update proxy log")
+		return
+	}
+
+	// 2. INSERT with MAX+1 — this statement sees latest committed batch_index
+	//    because it's a new statement in the transaction (READ COMMITTED)
+	result, err := tx.Exec(ctx,
+		`INSERT INTO proxy_log_events (session_id, batch_index, events)
+		 VALUES ($1, (SELECT COALESCE(MAX(batch_index), -1) + 1
+		              FROM proxy_log_events WHERE session_id = $1), $2::jsonb)
+		 ON CONFLICT (session_id, batch_index) DO NOTHING`,
+		sessionID, newEntriesJSON)
+	if err != nil {
+		log.Printf("error: inserting proxy log events for session %s: %v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update proxy log")
+		return
+	}
+
+	// 3. UPDATE count — only if INSERT actually inserted a row
+	if result.RowsAffected() > 0 {
+		_, err = tx.Exec(ctx,
+			"UPDATE sessions SET proxy_event_count = COALESCE(proxy_event_count, 0) + $1 WHERE id = $2",
+			len(req.Entries), sessionID)
+		if err != nil {
+			log.Printf("error: updating proxy event count for session %s: %v", sessionID, err)
+			respondError(w, http.StatusInternalServerError, "failed to update proxy log")
+			return
+		}
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		log.Printf("error: committing proxy log transaction for session %s: %v", sessionID, err)
 		respondError(w, http.StatusInternalServerError, "failed to update proxy log")
 		return
 	}
@@ -877,10 +953,7 @@ func (a *API) handleGetProxyLog(w http.ResponseWriter, r *http.Request, sessionI
 		return
 	}
 
-	var proxyLog json.RawMessage
-	err := a.db.QueryRow(r.Context(),
-		`SELECT COALESCE(proxy_log, '[]'::jsonb) FROM sessions WHERE id = $1`, sessionID,
-	).Scan(&proxyLog)
+	proxyLog, err := a.readEventRows(r.Context(), sessionID, "proxy_log_events", "proxy_log")
 	if err != nil {
 		respondError(w, http.StatusNotFound, "session or proxy log not found")
 		return
@@ -1154,6 +1227,52 @@ func (a *API) listSessions(ctx context.Context, status, repo, agent, since, unti
 	}
 
 	return sessions, total, rows.Err()
+}
+
+// readEventRows reads event data from both legacy columns and new tables, merging them.
+// This handles the migration period where sessions may have data in both locations.
+// Legacy column data is prepended before new table data.
+func (a *API) readEventRows(ctx context.Context, sessionID, tableName, legacyColumn string) (json.RawMessage, error) {
+	var allEvents []json.RawMessage
+
+	// 1. Read legacy column (may have data from pre-migration or mid-deployment sessions)
+	var legacy json.RawMessage
+	err := a.db.QueryRow(ctx,
+		"SELECT "+legacyColumn+" FROM sessions WHERE id = $1", sessionID,
+	).Scan(&legacy)
+	if err == nil && legacy != nil {
+		var events []json.RawMessage
+		if json.Unmarshal(legacy, &events) == nil {
+			allEvents = append(allEvents, events...)
+		}
+	}
+
+	// 2. Read new table (append after legacy data)
+	rows, err := a.db.Query(ctx,
+		"SELECT events FROM "+tableName+" WHERE session_id = $1 ORDER BY batch_index", sessionID,
+	)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var batchEvents json.RawMessage
+			if err := rows.Scan(&batchEvents); err == nil {
+				var events []json.RawMessage
+				if json.Unmarshal(batchEvents, &events) == nil {
+					allEvents = append(allEvents, events...)
+				}
+			}
+		}
+	}
+
+	// 3. Return merged result (empty array if both sources are empty)
+	if len(allEvents) == 0 {
+		return json.RawMessage("[]"), nil
+	}
+	result, err := json.Marshal(allEvents)
+	if err != nil {
+		return json.RawMessage("[]"), err
+	}
+	return result, nil
 }
 
 func (a *API) getSession(ctx context.Context, id string) (*internal.Session, error) {
