@@ -1233,10 +1233,27 @@ func (a *API) listSessions(ctx context.Context, status, repo, agent, since, unti
 // This handles the migration period where sessions may have data in both locations.
 // Legacy column data is prepended before new table data.
 func (a *API) readEventRows(ctx context.Context, sessionID, tableName, legacyColumn string) (json.RawMessage, error) {
+	// SECURITY: Whitelist validation to prevent SQL injection
+	// tableName and legacyColumn parameters must be predefined constants from the allowed map
+	allowedTables := map[string]map[string]bool{
+		"transcript_events": {"transcript": true},
+		"proxy_log_events":  {"proxy_log": true},
+	}
+
+	allowedColumns, tableExists := allowedTables[tableName]
+	if !tableExists {
+		return nil, fmt.Errorf("invalid table name: %s", tableName)
+	}
+
+	if !allowedColumns[legacyColumn] {
+		return nil, fmt.Errorf("invalid legacy column for table %s: %s", tableName, legacyColumn)
+	}
+
 	var allEvents []json.RawMessage
 
 	// 1. Read legacy column (may have data from pre-migration or mid-deployment sessions)
 	var legacy json.RawMessage
+	// Safe to use string concatenation here because legacyColumn has been validated against whitelist
 	err := a.db.QueryRow(ctx,
 		"SELECT "+legacyColumn+" FROM sessions WHERE id = $1", sessionID,
 	).Scan(&legacy)
@@ -1248,6 +1265,7 @@ func (a *API) readEventRows(ctx context.Context, sessionID, tableName, legacyCol
 	}
 
 	// 2. Read new table (append after legacy data)
+	// Safe to use string concatenation here because tableName has been validated against whitelist
 	rows, err := a.db.Query(ctx,
 		"SELECT events FROM "+tableName+" WHERE session_id = $1 ORDER BY batch_index", sessionID,
 	)
