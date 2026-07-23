@@ -138,6 +138,26 @@ func (e *Evaluator) evaluateSimpleExpression(condition string, ctx *EvaluationCo
 		return false, nil
 	}
 
+	// Pattern for null output conditions: steps.stepName.outputs.outputKey == null or != null
+	nullPattern := regexp.MustCompile(`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=)\s*null`)
+	if matches := nullPattern.FindStringSubmatch(condition); len(matches) == 4 {
+		stepID := matches[1]
+		outputKey := matches[2]
+		operator := matches[3]
+
+		exists := false
+		if stepOutput, ok := ctx.StepOutputs[stepID]; ok {
+			if val, ok := stepOutput[outputKey]; ok {
+				exists = val != nil
+			}
+		}
+
+		if operator == "==" {
+			return !exists, nil
+		}
+		return exists, nil
+	}
+
 	// Pattern for numeric output conditions: steps.stepName.outputs.outputKey OPERATOR number
 	numericPattern := regexp.MustCompile(`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=|>|<|>=|<=)\s*(\d+(?:\.\d+)?)`)
 	if matches := numericPattern.FindStringSubmatch(condition); len(matches) == 5 {
@@ -297,6 +317,7 @@ func (e *Evaluator) validateSimpleCondition(condition string) error {
 	patterns := []string{
 		`steps\.(\w+)\.outcome\s*(==|!=)\s*'([^']*)'`,
 		`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=|>|<|>=|<=)\s*'([^']*)'`,
+		`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=)\s*null`,
 		`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=|>|<|>=|<=)\s*(\d+(?:\.\d+)?)`,
 	}
 

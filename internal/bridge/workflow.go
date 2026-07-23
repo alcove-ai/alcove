@@ -388,6 +388,7 @@ func validateConditionSyntax(condition string) error {
 	patterns := []string{
 		`steps\.(\w+)\.outcome\s*(==|!=)\s*'([^']*)'`,
 		`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=|>|<|>=|<=)\s*'([^']*)'`,
+		`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=)\s*null`,
 		`steps\.(\w+)\.outputs\.(\w+)\s*(==|!=|>|<|>=|<=)\s*(\d+(?:\.\d+)?)`,
 	}
 
