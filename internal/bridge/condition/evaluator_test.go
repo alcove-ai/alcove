@@ -565,3 +565,208 @@ func TestEvaluator_TypeConversion(t *testing.T) {
 		})
 	}
 }
+func TestEvaluator_NullConditions(t *testing.T) {
+	evaluator := NewEvaluator()
+
+	tests := []struct {
+		name      string
+		condition string
+		context   *EvaluationContext
+		expected  bool
+		hasError  bool
+	}{
+		{
+			name:      "output key missing - equals null should be true",
+			condition: "steps.test.outputs.missing == null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"test": {"other": "value"},
+				},
+			},
+			expected: true,
+			hasError: false,
+		},
+		{
+			name:      "output key missing - not equals null should be false",
+			condition: "steps.test.outputs.missing != null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"test": {"other": "value"},
+				},
+			},
+			expected: false,
+			hasError: false,
+		},
+		{
+			name:      "output key exists with non-nil value - equals null should be false",
+			condition: "steps.test.outputs.status == null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"test": {"status": "success"},
+				},
+			},
+			expected: false,
+			hasError: false,
+		},
+		{
+			name:      "output key exists with non-nil value - not equals null should be true",
+			condition: "steps.test.outputs.status != null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"test": {"status": "success"},
+				},
+			},
+			expected: true,
+			hasError: false,
+		},
+		{
+			name:      "entire step missing - equals null should be true",
+			condition: "steps.missing.outputs.value == null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{},
+			},
+			expected: true,
+			hasError: false,
+		},
+		{
+			name:      "entire step missing - not equals null should be false",
+			condition: "steps.missing.outputs.value != null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{},
+			},
+			expected: false,
+			hasError: false,
+		},
+		{
+			name:      "output key exists with explicit nil value - equals null should be true",
+			condition: "steps.test.outputs.value == null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"test": {"value": nil},
+				},
+			},
+			expected: true,
+			hasError: false,
+		},
+		{
+			name:      "output key exists with explicit nil value - not equals null should be false",
+			condition: "steps.test.outputs.value != null",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"test": {"value": nil},
+				},
+			},
+			expected: false,
+			hasError: false,
+		},
+		{
+			name:      "null comparison in complex expression - both conditions true",
+			condition: "steps.a.outputs.x != null && steps.a.outputs.x == 'value'",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"a": {"x": "value"},
+				},
+			},
+			expected: true,
+			hasError: false,
+		},
+		{
+			name:      "null comparison in complex expression - first condition false",
+			condition: "steps.a.outputs.x != null && steps.a.outputs.x == 'value'",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"a": {"y": "other"},
+				},
+			},
+			expected: false,
+			hasError: false,
+		},
+		{
+			name:      "null comparison with OR operator",
+			condition: "steps.a.outputs.x == null || steps.b.outputs.y == 'found'",
+			context: &EvaluationContext{
+				StepOutputs: map[string]map[string]interface{}{
+					"a": {"z": "exists"},
+					"b": {"y": "found"},
+				},
+			},
+			expected: true,
+			hasError: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := evaluator.Evaluate(test.condition, test.context)
+
+			if test.hasError && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !test.hasError && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if result != test.expected {
+				t.Errorf("expected %v, got %v", test.expected, result)
+			}
+		})
+	}
+}
+
+func TestEvaluator_NullValidation(t *testing.T) {
+	evaluator := NewEvaluator()
+
+	tests := []struct {
+		name      string
+		condition string
+		hasError  bool
+	}{
+		{
+			name:      "valid null equality condition",
+			condition: "steps.test.outputs.value == null",
+			hasError:  false,
+		},
+		{
+			name:      "valid null inequality condition",
+			condition: "steps.test.outputs.value != null",
+			hasError:  false,
+		},
+		{
+			name:      "invalid null greater than condition",
+			condition: "steps.test.outputs.value > null",
+			hasError:  true,
+		},
+		{
+			name:      "invalid null less than condition",
+			condition: "steps.test.outputs.value < null",
+			hasError:  true,
+		},
+		{
+			name:      "invalid null greater than or equal condition",
+			condition: "steps.test.outputs.value >= null",
+			hasError:  true,
+		},
+		{
+			name:      "invalid null less than or equal condition",
+			condition: "steps.test.outputs.value <= null",
+			hasError:  true,
+		},
+		{
+			name:      "valid complex condition with null",
+			condition: "steps.a.outputs.x != null && steps.b.outputs.y == 'value'",
+			hasError:  false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := evaluator.ValidateCondition(test.condition)
+
+			if test.hasError && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !test.hasError && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
