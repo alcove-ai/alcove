@@ -78,6 +78,8 @@ make build                    # Build all Go binaries to bin/
 make build-images             # Build container images with podman (smart rebuild via stamps)
 make build-tooling            # Build heavy skiff-tooling base image (only when tools change)
 make test                     # Run tests
+make pre-commit               # Run go vet + golangci-lint (issues new since main) before committing
+make install-hooks            # Install the opt-in git pre-commit hook (runs 'make pre-commit')
 
 # Infrastructure
 make dev-infra                # Start only NATS + PostgreSQL on podman

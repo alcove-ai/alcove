@@ -29,7 +29,7 @@ GATE_SOURCES := $(shell find cmd/gate/ -name '*.go' -type f 2>/dev/null) build/C
 SKIFF_SOURCES := $(shell find cmd/skiff-init/ -name '*.go' -type f 2>/dev/null) build/Containerfile.skiff-base build/alcove-credential-helper
 
 .PHONY: all build build-cli-all build-images build-image-bridge build-image-gate build-image-skiff-base build-skiff build-dev \
-        test test-network test-ledger test-isolation test-schedules test-credentials test-security-profiles test-yaml-security-profiles test-gate-real lint clean clean-stamps \
+        test test-network test-ledger test-isolation test-schedules test-credentials test-security-profiles test-yaml-security-profiles test-gate-real lint pre-commit install-hooks clean clean-stamps \
         up down logs watch dev-config dev-up dev-down dev-logs dev-reset dev-infra help \
         login-registry push pull up-pull build-tooling push-tooling \
         k3s-setup k3s-up k3s-watch k3s-down k3s-reset k3s-status
@@ -411,6 +411,16 @@ lint: ## Run linters (go vet + staticcheck)
 	$(GO) vet ./...
 	@which staticcheck >/dev/null 2>&1 && staticcheck ./... || \
 		echo "staticcheck not installed; run: go install honnef.co/go/tools/cmd/staticcheck@latest"
+
+pre-commit: ## Run pre-commit checks (go vet + golangci-lint on issues new since main)
+	$(GO) vet ./...
+	@which golangci-lint >/dev/null 2>&1 && golangci-lint run --new-from-merge-base=main || \
+		echo "golangci-lint not installed; run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"
+
+install-hooks: ## Install the opt-in git pre-commit hook (runs 'make pre-commit')
+	@cp scripts/git-hooks/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Installed .git/hooks/pre-commit — it runs 'make pre-commit' on every commit."
 
 ##@ Cleanup
 

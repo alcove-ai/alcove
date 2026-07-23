@@ -1,0 +1,7 @@
+#!/bin/sh
+# Alcove git pre-commit hook (opt-in — install with `make install-hooks`).
+#
+# Runs the same static-analysis gate as CI on the changes being committed:
+# go vet plus golangci-lint (only issues new since main). Exits non-zero to
+# abort the commit if the checks fail.
+exec make pre-commit

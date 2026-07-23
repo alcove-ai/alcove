@@ -30,6 +30,29 @@ jobs:
         env:
           GOPROXY: direct
 
+  # Lint — runs on every PR. Fast static analysis via golangci-lint, which bundles
+  # staticcheck, govet, errcheck, ineffassign, and unused (config in .golangci.yml).
+  # `only-new-issues` gates issues a PR *introduces* without blocking on the existing
+  # lint debt, so the check can be adopted now and tightened as the baseline is cleaned.
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          only-new-issues: true
+
   # Everything below only runs on pushes to main (post-merge) or manual workflow dispatch.
   # These are heavier tests that validate the full stack but don't block PRs.
 

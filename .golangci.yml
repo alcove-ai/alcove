@@ -1,0 +1,22 @@
+# golangci-lint configuration (config schema v2 — golangci-lint >= 2.x).
+#
+# Adoption strategy for an existing codebase with pre-existing lint debt:
+# CI runs golangci-lint with `only-new-issues: true` (see
+# .github/workflows/ci.yml) and `make pre-commit` runs it with
+# `--new-from-merge-base=main`. Both gate only the issues a change *introduces*,
+# never the historical baseline — so linting can land now and be tightened
+# incrementally as the existing debt is paid down. golangci-lint bundles
+# staticcheck, govet, errcheck, ineffassign, and unused, so a single
+# golangci-lint run covers the checks the standalone `make lint` target runs
+# plus more.
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
