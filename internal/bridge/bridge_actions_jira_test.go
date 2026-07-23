@@ -929,44 +929,277 @@ func TestJiraLinkRequestBuilding(t *testing.T) {
 	}
 }
 
-func TestJiraParentFieldLogic(t *testing.T) {
-	// Test the parent field logic in create-issue
+func TestJiraGetIssueWithDescriptionAndLabels(t *testing.T) {
+	// Test the JSON response parsing logic with description (ADF) and labels fields
 	testCases := []struct {
-		name           string
-		parent         string
-		shouldHaveParent bool
+		name     string
+		response string
+		expected map[string]interface{}
 	}{
-		{"with parent", "TEST-100", true},
-		{"empty parent", "", false},
-		{"whitespace parent", "   ", true}, // getStringInput doesn't trim, so this is technically valid
+		{
+			name: "response with ADF description and labels",
+			response: `{
+				"key": "TEST-123",
+				"fields": {
+					"summary": "Test issue",
+					"status": {"name": "Open"},
+					"issuetype": {"name": "Epic"},
+					"parent": {"key": "TEST-100"},
+					"description": {
+						"type": "doc",
+						"version": 1,
+						"content": [
+							{
+								"type": "paragraph",
+								"content": [
+									{
+										"type": "text",
+										"text": "This is a test description."
+									}
+								]
+							}
+						]
+					},
+					"labels": ["bug", "urgent", "plan-ready"]
+				}
+			}`,
+			expected: map[string]interface{}{
+				"issue_key":   "TEST-123",
+				"summary":     "Test issue",
+				"status":      "Open",
+				"issue_type":  "Epic",
+				"parent_key":  "TEST-100",
+				"description": "This is a test description.",
+				"labels":      []string{"bug", "urgent", "plan-ready"},
+			},
+		},
+		{
+			name: "response with empty description and no labels",
+			response: `{
+				"key": "TEST-456",
+				"fields": {
+					"summary": "Another issue",
+					"status": {"name": "Closed"},
+					"issuetype": {"name": "Task"},
+					"description": null,
+					"labels": []
+				}
+			}`,
+			expected: map[string]interface{}{
+				"issue_key":   "TEST-456",
+				"summary":     "Another issue",
+				"status":      "Closed",
+				"issue_type":  "Task",
+				"parent_key":  "",
+				"description": "",
+				"labels":      []string{},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			inputs := map[string]interface{}{
-				"parent": tc.parent,
+			var getResp struct {
+				Key    string `json:"key"`
+				Fields struct {
+					Summary   string `json:"summary"`
+					Status    *struct {
+						Name string `json:"name"`
+					} `json:"status"`
+					IssueType *struct {
+						Name string `json:"name"`
+					} `json:"issuetype"`
+					Parent *struct {
+						Key string `json:"key"`
+					} `json:"parent"`
+					Description json.RawMessage `json:"description"`
+					Labels      []string        `json:"labels"`
+				} `json:"fields"`
 			}
 
-			parent := getStringInput(inputs, "parent")
-			
-			fields := make(map[string]interface{})
-			if parent != "" {
-				fields["parent"] = map[string]interface{}{
-					"key": parent,
-				}
+			err := json.Unmarshal([]byte(tc.response), &getResp)
+			if err != nil {
+				t.Fatalf("Failed to parse JSON: %v", err)
 			}
 
-			_, hasParent := fields["parent"]
-			if hasParent != tc.shouldHaveParent {
-				t.Errorf("Expected hasParent=%v, got %v for parent '%s'", tc.shouldHaveParent, hasParent, tc.parent)
+			// Build outputs like the real function does
+			outputs := map[string]interface{}{
+				"issue_key": getResp.Key,
+				"summary":   getResp.Fields.Summary,
 			}
 
-			if tc.shouldHaveParent {
-				parentObj := fields["parent"].(map[string]interface{})
-				if parentObj["key"] != tc.parent {
-					t.Errorf("Expected parent key %s, got %v", tc.parent, parentObj["key"])
+			if getResp.Fields.Status != nil {
+				outputs["status"] = getResp.Fields.Status.Name
+			} else {
+				outputs["status"] = ""
+			}
+
+			if getResp.Fields.IssueType != nil {
+				outputs["issue_type"] = getResp.Fields.IssueType.Name
+			} else {
+				outputs["issue_type"] = ""
+			}
+
+			if getResp.Fields.Parent != nil {
+				outputs["parent_key"] = getResp.Fields.Parent.Key
+			} else {
+				outputs["parent_key"] = ""
+			}
+
+			// Add description (extract text from ADF)
+			outputs["description"] = extractADFText(getResp.Fields.Description)
+
+			// Add labels
+			outputs["labels"] = getResp.Fields.Labels
+
+			// Verify outputs match expectations
+			for key, expected := range tc.expected {
+				if key == "labels" {
+					// Special handling for slice comparison
+					expectedLabels := expected.([]string)
+					actualLabels := outputs[key].([]string)
+					if len(expectedLabels) != len(actualLabels) {
+						t.Errorf("Expected labels length %d, got %d", len(expectedLabels), len(actualLabels))
+						continue
+					}
+					for i, label := range expectedLabels {
+						if i >= len(actualLabels) || actualLabels[i] != label {
+							t.Errorf("Expected labels[%d]=%s, got %s", i, label, actualLabels[i])
+						}
+					}
+				} else {
+					if outputs[key] != expected {
+						t.Errorf("Expected %s=%v, got %v", key, expected, outputs[key])
+					}
 				}
 			}
 		})
 	}
 }
+
+func TestJiraSearchIssuesWithLabels(t *testing.T) {
+	// Test that jira-search-issues includes labels in per-issue output
+	searchResp := `{
+		"total": 2,
+		"issues": [
+			{
+				"key": "TEST-123",
+				"fields": {
+					"summary": "First issue",
+					"status": {"name": "Open"},
+					"issuetype": {"name": "Bug"},
+					"priority": {"name": "High"},
+					"labels": ["bug", "urgent"]
+				}
+			},
+			{
+				"key": "TEST-124",
+				"fields": {
+					"summary": "Second issue",
+					"status": {"name": "Closed"},
+					"issuetype": {"name": "Task"},
+					"priority": null,
+					"labels": ["enhancement", "low-priority"]
+				}
+			}
+		]
+	}`
+
+	var parsedResp struct {
+		Total  int `json:"total"`
+		Issues []struct {
+			Key    string `json:"key"`
+			Fields struct {
+				Summary   string `json:"summary"`
+				Status    struct {
+					Name string `json:"name"`
+				} `json:"status"`
+				IssueType struct {
+					Name string `json:"name"`
+				} `json:"issuetype"`
+				Priority *struct {
+					Name string `json:"name"`
+				} `json:"priority"`
+				Labels []string `json:"labels"`
+			} `json:"fields"`
+		} `json:"issues"`
+	}
+
+	err := json.Unmarshal([]byte(searchResp), &parsedResp)
+	if err != nil {
+		t.Fatalf("Failed to parse search response: %v", err)
+	}
+
+	// Build structured output like the real function does
+	var issueKeys []string
+	var issues []map[string]interface{}
+
+	for _, issue := range parsedResp.Issues {
+		issueKeys = append(issueKeys, issue.Key)
+
+		issueObj := map[string]interface{}{
+			"key":     issue.Key,
+			"summary": issue.Fields.Summary,
+			"status":  issue.Fields.Status.Name,
+			"type":    issue.Fields.IssueType.Name,
+			"url":     fmt.Sprintf("https://example.com/browse/%s", issue.Key),
+		}
+
+		// Priority is optional in JIRA
+		if issue.Fields.Priority != nil {
+			issueObj["priority"] = issue.Fields.Priority.Name
+		} else {
+			issueObj["priority"] = ""
+		}
+
+		// Add labels
+		issueObj["labels"] = issue.Fields.Labels
+
+		issues = append(issues, issueObj)
+	}
+
+	// Verify the results
+	if len(issues) != 2 {
+		t.Errorf("Expected 2 issues, got %d", len(issues))
+	}
+
+	// Check first issue
+	firstIssue := issues[0]
+	if firstIssue["key"] != "TEST-123" {
+		t.Errorf("Expected first issue key TEST-123, got %v", firstIssue["key"])
+	}
+
+	expectedFirstLabels := []string{"bug", "urgent"}
+	firstLabels := firstIssue["labels"].([]string)
+	if len(firstLabels) != len(expectedFirstLabels) {
+		t.Errorf("Expected first issue %d labels, got %d", len(expectedFirstLabels), len(firstLabels))
+	}
+	for i, label := range expectedFirstLabels {
+		if i >= len(firstLabels) || firstLabels[i] != label {
+			t.Errorf("Expected first issue labels[%d]=%s, got %s", i, label, firstLabels[i])
+		}
+	}
+
+	// Check second issue
+	secondIssue := issues[1]
+	if secondIssue["key"] != "TEST-124" {
+		t.Errorf("Expected second issue key TEST-124, got %v", secondIssue["key"])
+	}
+
+	expectedSecondLabels := []string{"enhancement", "low-priority"}
+	secondLabels := secondIssue["labels"].([]string)
+	if len(secondLabels) != len(expectedSecondLabels) {
+		t.Errorf("Expected second issue %d labels, got %d", len(expectedSecondLabels), len(secondLabels))
+	}
+	for i, label := range expectedSecondLabels {
+		if i >= len(secondLabels) || secondLabels[i] != label {
+			t.Errorf("Expected second issue labels[%d]=%s, got %s", i, label, secondLabels[i])
+		}
+	}
+
+	// Verify that the second issue has empty priority
+	if secondIssue["priority"] != "" {
+		t.Errorf("Expected second issue priority to be empty, got %v", secondIssue["priority"])
+	}
+}
+

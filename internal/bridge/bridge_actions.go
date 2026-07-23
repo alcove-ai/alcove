@@ -526,7 +526,7 @@ func ListBridgeActionSchemas() []BridgeActionSchema {
 				"max_results": "int (optional) - Maximum results to return (default: 50, max: 100)",
 			},
 			Outputs: map[string]string{
-				"issues":     "[]object - Array of issue objects with key/summary/status/type/priority/url",
+				"issues":     "[]object - Array of issue objects with key/summary/status/type/priority/url/labels",
 				"issue_keys": "[]string - Array of issue keys for easy iteration",
 				"total":      "int - Total number of matching issues",
 			},
@@ -552,14 +552,16 @@ func ListBridgeActionSchemas() []BridgeActionSchema {
 			Description: "Retrieve a single issue's fields from JIRA",
 			Inputs: map[string]string{
 				"issue_key": "string (required) - JIRA issue key (e.g., 'PROJ-123')",
-				"fields":    "string (optional) - Comma-separated field list (default: 'summary,status,issuetype,parent')",
+				"fields":    "string (optional) - Comma-separated field list (default: 'summary,status,issuetype,parent,description,labels')",
 			},
 			Outputs: map[string]string{
-				"issue_key":  "string - Issue key",
-				"summary":    "string - Issue summary/title",
-				"status":     "string - Issue status name",
-				"issue_type": "string - Issue type name",
-				"parent_key": "string - Parent issue key (empty if no parent)",
+				"issue_key":   "string - Issue key",
+				"summary":     "string - Issue summary/title",
+				"status":      "string - Issue status name",
+				"issue_type":  "string - Issue type name",
+				"parent_key":  "string - Parent issue key (empty if no parent)",
+				"description": "string - Issue description text",
+				"labels":      "[]string - Issue labels array",
 			},
 		},
 		{

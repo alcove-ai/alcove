@@ -39,6 +39,12 @@ func TestExpandTemplateWithContext(t *testing.T) {
 			"pr_number": float64(99), // JSON numbers decode as float64
 			"pr_url":    "https://github.com/org/repo/pull/99",
 		},
+		// Step with array outputs for testing array indexing.
+		"find-issues": map[string]interface{}{
+			"issue_keys":    []interface{}{"PROJ-1", "PROJ-2", "PROJ-3"},
+			"issue_strings": []string{"first", "second", "third"},
+			"count":         3,
+		},
 	}
 
 	triggerRef := "owner/repo#42"
@@ -82,6 +88,41 @@ func TestExpandTemplateWithContext(t *testing.T) {
 			name:     "multiple templates in one string",
 			template: "PR {{steps.create-pr.outputs.pr_number}} for issue {{trigger.issue_number}}",
 			expected: "PR 99 for issue 42",
+		},
+		{
+			name:     "array index on []interface{} - valid index",
+			template: "First issue: {{steps.find-issues.outputs.issue_keys[0]}}",
+			expected: "First issue: PROJ-1",
+		},
+		{
+			name:     "array index on []interface{} - middle index",
+			template: "Second issue: {{steps.find-issues.outputs.issue_keys[1]}}",
+			expected: "Second issue: PROJ-2",
+		},
+		{
+			name:     "array index on []string - valid index",
+			template: "First string: {{steps.find-issues.outputs.issue_strings[0]}}",
+			expected: "First string: first",
+		},
+		{
+			name:     "array index on []string - last index",
+			template: "Third string: {{steps.find-issues.outputs.issue_strings[2]}}",
+			expected: "Third string: third",
+		},
+		{
+			name:     "array index out of bounds - returns empty string",
+			template: "Out of bounds: {{steps.find-issues.outputs.issue_keys[99]}}",
+			expected: "Out of bounds: ",
+		},
+		{
+			name:     "array index on non-array value - returns empty string",
+			template: "Non-array: {{steps.find-issues.outputs.count[0]}}",
+			expected: "Non-array: ",
+		},
+		{
+			name:     "array index with unresolved step - remains as literal",
+			template: "Unresolved: {{steps.nonexistent.outputs.values[0]}}",
+			expected: "Unresolved: {{steps.nonexistent.outputs.values[0]}}",
 		},
 	}
 
