@@ -391,7 +391,7 @@ func bridgeActionJiraSearchIssues(ctx context.Context, inputs map[string]interfa
 	}
 
 	// Search issues
-	searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&maxResults=%d&fields=key,summary,status,issuetype,priority",
+	searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&maxResults=%d&fields=key,summary,status,issuetype,priority,labels",
 		apiHost, url.QueryEscape(jql), maxResults)
 
 	respData, err := jiraRequest(ctx, token, "GET", searchURL, nil)
@@ -417,6 +417,7 @@ func bridgeActionJiraSearchIssues(ctx context.Context, inputs map[string]interfa
 				Priority *struct {
 					Name string `json:"name"`
 				} `json:"priority"`
+				Labels []string `json:"labels"`
 			} `json:"fields"`
 		} `json:"issues"`
 	}
@@ -448,6 +449,9 @@ func bridgeActionJiraSearchIssues(ctx context.Context, inputs map[string]interfa
 		} else {
 			issueObj["priority"] = ""
 		}
+
+		// Add labels
+		issueObj["labels"] = issue.Fields.Labels
 
 		issues = append(issues, issueObj)
 	}
@@ -719,7 +723,7 @@ func bridgeActionJiraGetIssue(ctx context.Context, inputs map[string]interface{}
 
 	fields := getStringInput(inputs, "fields")
 	if fields == "" {
-		fields = "summary,status,issuetype,parent"
+		fields = "summary,status,issuetype,parent,description,labels"
 	}
 
 	token, apiHost, err := credStore.AcquireSCMTokenForOwner(ctx, "jira", teamID)
@@ -760,6 +764,8 @@ func bridgeActionJiraGetIssue(ctx context.Context, inputs map[string]interface{}
 			Parent *struct {
 				Key string `json:"key"`
 			} `json:"parent"`
+			Description json.RawMessage `json:"description"`
+			Labels      []string        `json:"labels"`
 		} `json:"fields"`
 	}
 	if err := json.Unmarshal(respData, &getResp); err != nil {
@@ -792,6 +798,12 @@ func bridgeActionJiraGetIssue(ctx context.Context, inputs map[string]interface{}
 	} else {
 		outputs["parent_key"] = ""
 	}
+
+	// Add description (extract text from ADF)
+	outputs["description"] = extractADFText(getResp.Fields.Description)
+
+	// Add labels
+	outputs["labels"] = getResp.Fields.Labels
 
 	return &BridgeActionResult{
 		Status:  "succeeded",

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1190,19 +1191,46 @@ func (we *WorkflowEngine) expandTemplateWithContext(template string, stepOutputs
 		}
 	}
 
-	// Pattern: {{steps.stepName.outputs.outputName}}
-	pattern := regexp.MustCompile(`\{\{steps\.([\w-]+)\.outputs\.([\w-]+)\}\}`)
+	// Pattern: {{steps.stepName.outputs.outputName}} with optional [N] array indexing
+	pattern := regexp.MustCompile(`\{\{steps\.([\w-]+)\.outputs\.([\w-]+)(?:\[(\d+)\])?\}\}`)
 	matches := pattern.FindAllStringSubmatch(result, -1)
 
 	for _, match := range matches {
 		fullMatch := match[0]
 		stepID := match[1]
 		outputKey := match[2]
+		indexStr := match[3] // Will be empty if no [N] suffix
 
 		if stepOutput, exists := stepOutputs[stepID]; exists {
 			if outputMap, ok := stepOutput.(map[string]interface{}); ok {
 				if outputValue, exists := outputMap[outputKey]; exists {
-					result = strings.ReplaceAll(result, fullMatch, fmt.Sprintf("%v", outputValue))
+					// Handle array indexing if provided
+					if indexStr != "" {
+						index, err := strconv.Atoi(indexStr)
+						if err == nil {
+							// Try to index into the output value
+							var indexedValue interface{}
+							switch v := outputValue.(type) {
+							case []interface{}:
+								if index >= 0 && index < len(v) {
+									indexedValue = v[index]
+								}
+							case []string:
+								if index >= 0 && index < len(v) {
+									indexedValue = v[index]
+								}
+							}
+							if indexedValue != nil {
+								result = strings.ReplaceAll(result, fullMatch, fmt.Sprintf("%v", indexedValue))
+							} else {
+								// Out of bounds or non-array - replace with empty string
+								result = strings.ReplaceAll(result, fullMatch, "")
+							}
+						}
+					} else {
+						// No indexing - use the value as is
+						result = strings.ReplaceAll(result, fullMatch, fmt.Sprintf("%v", outputValue))
+					}
 				}
 			}
 		}
