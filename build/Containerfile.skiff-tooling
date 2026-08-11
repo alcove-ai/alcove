@@ -69,7 +69,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     chmod -R a+rX /opt/uv-tools /opt/uv-python
 
 # Install swamp CLI (download binary from GitHub Releases; get.swamp.club is not resolvable)
-RUN curl -fsSL "$(curl -s https://api.github.com/repos/swamp-club/swamp/releases/latest | grep -o 'https://[^"]*swamp-linux-x86_64')" \
+RUN curl -fsSL "$(curl -s https://api.github.com/repos/swamp-club/swamp/releases/latest | grep -o 'https://[^"]*swamp-linux-x86_64' | head -1)" \
     -o /usr/local/bin/swamp && chmod +x /usr/local/bin/swamp
 
 # Create a non-root user for running sessions
