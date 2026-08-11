@@ -31,9 +31,13 @@ COPY --from=builder /out/bridge /usr/local/bin/bridge
 # Copy dashboard static files
 COPY web/ /web/
 
+# Copy gitlab CAs
+COPY build/certs/redhat-internal-ca-bundle.pem /etc/pki/ca-trust/source/anchors/
+
 # Install podman CLI for container management (Bridge creates
 # Skiff+Gate containers via whichever runtime is configured).
 RUN dnf install -y podman git && \
+    update-ca-trust && \
     useradd -m -u 1001 -s /sbin/nologin alcove && \
     mkdir -p /tmp/podman-config /tmp/podman-data && \
     chmod 777 /tmp/podman-config /tmp/podman-data && \
