@@ -68,6 +68,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     uv tool install git+https://github.com/RedHatProductSecurity/lola.git && \
     chmod -R a+rX /opt/uv-tools /opt/uv-python
 
+# Install swamp CLI
+RUN curl -fsSL https://get.swamp.club | sh
+
 # Create a non-root user for running sessions
 RUN useradd -m -u 1001 -s /bin/bash skiff && \
     chmod 777 /home/skiff
