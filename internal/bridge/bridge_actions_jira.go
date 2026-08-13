@@ -298,6 +298,9 @@ func bridgeActionJiraAddComment(ctx context.Context, inputs map[string]interface
 		}, nil
 	}
 
+	// Add bot marker to all Alcove bot comments for cross-team detection
+	body = body + "\n\n---\n_Posted by Alcove_"
+
 	token, apiHost, err := credStore.AcquireSCMTokenForOwner(ctx, "jira", teamID)
 	if err != nil {
 		return &BridgeActionResult{
