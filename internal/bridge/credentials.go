@@ -434,6 +434,50 @@ func (cs *CredentialStore) FirstAvailableProvider(ctx context.Context, teamID st
 	return &c, nil
 }
 
+// SCMCredentialResult holds a decrypted SCM credential with team context
+type SCMCredentialResult struct {
+	Token   string `json:"token"`
+	TeamID  string `json:"team_id"`
+	APIHost string `json:"api_host"`
+}
+
+// AllSCMCredentials returns all decrypted credentials for a given service (e.g., "jira")
+// across all teams. This is used by the JIRA poller for cross-team bot detection.
+func (cs *CredentialStore) AllSCMCredentials(ctx context.Context, service string) ([]SCMCredentialResult, error) {
+	rows, err := cs.db.Query(ctx,
+		`SELECT credential, COALESCE(team_id::text, ''), COALESCE(api_host, '')
+		FROM provider_credentials
+		WHERE provider = $1 AND team_id IS NOT NULL
+		ORDER BY created_at DESC`,
+		service)
+	if err != nil {
+		return nil, fmt.Errorf("querying %s credentials: %w", service, err)
+	}
+	defer rows.Close()
+
+	var results []SCMCredentialResult
+	for rows.Next() {
+		var encrypted []byte
+		var teamID, apiHost string
+		if err := rows.Scan(&encrypted, &teamID, &apiHost); err != nil {
+			return nil, fmt.Errorf("scanning credential row: %w", err)
+		}
+
+		raw, err := decrypt(cs.key, encrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting credential for team %s: %w", teamID, err)
+		}
+
+		results = append(results, SCMCredentialResult{
+			Token:   string(raw),
+			TeamID:  teamID,
+			APIHost: apiHost,
+		})
+	}
+
+	return results, rows.Err()
+}
+
 // LookupProviderCredential looks up credential metadata (without decrypting)
 // by provider or credential name. Returns nil if not found.
 func (cs *CredentialStore) LookupProviderCredential(ctx context.Context, providerName, teamID string) (*Credential, error) {

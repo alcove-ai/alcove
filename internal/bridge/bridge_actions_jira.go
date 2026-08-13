@@ -313,6 +313,9 @@ func bridgeActionJiraAddComment(ctx context.Context, inputs map[string]interface
 		}, nil
 	}
 
+	// Add Alcove bot marker to the body before converting to ADF
+	body = body + "\n\n---\n_Posted by Alcove_"
+
 	// Build comment request with ADF body
 	commentReq := map[string]interface{}{
 		"body": wrapTextInADF(body),

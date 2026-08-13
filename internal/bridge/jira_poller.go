@@ -97,6 +97,9 @@ func (jp *JiraPoller) PollAll(ctx context.Context) {
 		return
 	}
 
+	// Resolve all bot identities across teams for cross-team bot detection
+	allBotAccountIDs := jp.resolveAllBotIdentities(ctx)
+
 	rows, err := jp.db.Query(ctx, `
 		SELECT s.name, s.event_config, s.team_id, s.source_key
 		FROM schedules s
@@ -150,7 +153,7 @@ func (jp *JiraPoller) PollAll(ctx context.Context) {
 	}
 
 	for teamID, tgts := range teamTargets {
-		jp.pollForTeam(ctx, teamID, tgts)
+		jp.pollForTeam(ctx, teamID, tgts, allBotAccountIDs)
 	}
 
 	jp.lastPollTime = time.Now()
@@ -203,7 +206,7 @@ func extractTextFromADFNode(node map[string]interface{}) string {
 	return text.String()
 }
 
-func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []jiraPollTarget) {
+func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []jiraPollTarget, allBotAccountIDs map[string]bool) {
 	token, _, err := jp.credStore.AcquireSCMTokenForOwner(ctx, "jira", teamID)
 	if err != nil {
 		log.Printf("jira-poller: no jira credential for team %s: %v", teamID, err)
@@ -212,12 +215,6 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 
 	// Clean up old dedup entries (older than 5 minutes)
 	_, _ = jp.db.Exec(ctx, `DELETE FROM dispatched_dedup WHERE dispatched_at < NOW() - INTERVAL '5 minutes'`)
-
-	// Resolve bot identity for this team (with caching)
-	botAccountID, err := jp.resolveBotIdentity(ctx, token)
-	if err != nil {
-		log.Printf("jira-poller: warning: failed to resolve bot identity for team %s: %v (continuing without bot detection)", teamID, err)
-	}
 
 	// Collect all projects from targets.
 	projectSet := make(map[string]bool)
@@ -299,22 +296,29 @@ func (jp *JiraPoller) pollForTeam(ctx context.Context, teamID string, targets []
 				}
 
 				// Get latest comment metadata for dedup and bot detection
-				var latestCommentID, latestCommentAuthorID string
+				var latestCommentID, latestCommentAuthorID, latestCommentBody string
 
 				// Always fetch comment metadata first for dedup/bot detection
 				// If we'll do enrichment, we'll fetch comments again but that's acceptable
-				id, authorID, err := jp.fetchLatestComment(ctx, token, issue.Key)
+				id, authorID, body, err := jp.fetchLatestComment(ctx, token, issue.Key)
 				if err != nil {
 					log.Printf("jira-poller: warning: could not fetch latest comment for %s: %v", issue.Key, err)
 					// Continue with empty values - will use "no-comment" dedup key
 				} else {
 					latestCommentID = id
 					latestCommentAuthorID = authorID
+					latestCommentBody = body
 				}
 
-				// Bot-comment check: skip if latest comment is from the bot
-				if botAccountID != "" && latestCommentAuthorID == botAccountID {
-					log.Printf("jira-poller: skipping %s — latest comment by bot (%s)", issue.Key, botAccountID)
+				// Cross-team bot detection: check if latest comment is from any known bot account ID
+				if latestCommentAuthorID != "" && allBotAccountIDs[latestCommentAuthorID] {
+					log.Printf("jira-poller: skipping %s — latest comment by cross-team bot (%s)", issue.Key, latestCommentAuthorID)
+					continue
+				}
+
+				// Fallback marker detection: check if comment contains the bot marker
+				if strings.Contains(latestCommentBody, "_Posted by Alcove_") {
+					log.Printf("jira-poller: skipping %s — latest comment contains bot marker", issue.Key)
 					continue
 				}
 
@@ -452,6 +456,32 @@ func (jp *JiraPoller) jiraRequest(ctx context.Context, credential, method, reqUR
 	return respBody, nil
 }
 
+// resolveAllBotIdentities fetches and caches bot account IDs for all Jira credentials
+// across all teams. This enables cross-team bot detection to prevent infinite loops.
+func (jp *JiraPoller) resolveAllBotIdentities(ctx context.Context) map[string]bool {
+	allBotAccountIDs := make(map[string]bool)
+
+	credentials, err := jp.credStore.AllSCMCredentials(ctx, "jira")
+	if err != nil {
+		log.Printf("jira-poller: warning: failed to fetch all jira credentials: %v (continuing with empty bot set)", err)
+		return allBotAccountIDs
+	}
+
+	for _, cred := range credentials {
+		botAccountID, err := jp.resolveBotIdentity(ctx, cred.Token)
+		if err != nil {
+			log.Printf("jira-poller: warning: failed to resolve bot identity for team %s: %v (skipping)", cred.TeamID, err)
+			continue
+		}
+		if botAccountID != "" {
+			allBotAccountIDs[botAccountID] = true
+		}
+	}
+
+	log.Printf("jira-poller: resolved %d bot account IDs across all teams for cross-team detection", len(allBotAccountIDs))
+	return allBotAccountIDs
+}
+
 // resolveBotIdentity calls GET /rest/api/3/myself to get the bot's accountId
 // and caches it using a hash of the credential for per-team uniqueness.
 func (jp *JiraPoller) resolveBotIdentity(ctx context.Context, credential string) (string, error) {
@@ -482,22 +512,23 @@ func (jp *JiraPoller) resolveBotIdentity(ctx context.Context, credential string)
 
 // fetchLatestComment fetches only the latest comment for an issue to extract metadata
 // for non-enriched issues (past the 10-issue enrichment cap).
-func (jp *JiraPoller) fetchLatestComment(ctx context.Context, credential, issueKey string) (string, string, error) {
+// Returns (id, authorID, body, error).
+func (jp *JiraPoller) fetchLatestComment(ctx context.Context, credential, issueKey string) (string, string, string, error) {
 	commentsURL := fmt.Sprintf("%s/rest/api/2/issue/%s/comment?maxResults=1&orderBy=-created", jp.baseURL, issueKey)
 
 	data, err := jp.jiraRequest(ctx, credential, "GET", commentsURL, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to fetch latest comment: %w", err)
+		return "", "", "", fmt.Errorf("failed to fetch latest comment: %w", err)
 	}
 
 	var comments JiraComments
 	if err := json.Unmarshal(data, &comments); err != nil {
-		return "", "", fmt.Errorf("failed to parse comments response: %w", err)
+		return "", "", "", fmt.Errorf("failed to parse comments response: %w", err)
 	}
 
 	if len(comments.Comments) == 0 {
-		return "", "", nil // No comments
+		return "", "", "", nil // No comments
 	}
 
-	return comments.Comments[0].ID, comments.Comments[0].Author.AccountID, nil
+	return comments.Comments[0].ID, comments.Comments[0].Author.AccountID, comments.Comments[0].Body, nil
 }
