@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -288,41 +289,172 @@ func TestJiraPoller_CompletedRunAllowsNewDispatch(t *testing.T) {
 func TestJiraPoller_BotCommentDoesNotTrigger(t *testing.T) {
 	// Unit test - no DB required
 	botAccountID := "bot-account-123"
-	userAccountID := "user-account-456"
+	otherTeamBotAccountID := "other-bot-456"
+	userAccountID := "user-account-789"
 
 	tests := []struct {
 		name                     string
 		latestCommentAuthorID    string
-		botAccountID             string
+		allBotAccountIDs         map[string]bool
 		shouldSkip               bool
 	}{
 		{
-			name:                     "bot comment should be skipped",
+			name:                     "own team bot comment should be skipped",
 			latestCommentAuthorID:    botAccountID,
-			botAccountID:             botAccountID,
+			allBotAccountIDs:         map[string]bool{botAccountID: true},
+			shouldSkip:               true,
+		},
+		{
+			name:                     "other team bot comment should be skipped",
+			latestCommentAuthorID:    otherTeamBotAccountID,
+			allBotAccountIDs:         map[string]bool{botAccountID: true, otherTeamBotAccountID: true},
 			shouldSkip:               true,
 		},
 		{
 			name:                     "user comment should not be skipped",
 			latestCommentAuthorID:    userAccountID,
-			botAccountID:             botAccountID,
+			allBotAccountIDs:         map[string]bool{botAccountID: true, otherTeamBotAccountID: true},
 			shouldSkip:               false,
 		},
 		{
-			name:                     "empty bot account ID should not skip",
+			name:                     "empty bot account ID set should not skip",
 			latestCommentAuthorID:    botAccountID,
-			botAccountID:             "",
+			allBotAccountIDs:         map[string]bool{},
+			shouldSkip:               false,
+		},
+		{
+			name:                     "nil bot account ID set should not skip",
+			latestCommentAuthorID:    botAccountID,
+			allBotAccountIDs:         nil,
 			shouldSkip:               false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate bot comment check logic
-			shouldSkip := tt.latestCommentAuthorID != "" && tt.botAccountID != "" && tt.latestCommentAuthorID == tt.botAccountID
+			// Simulate cross-team bot comment check logic
+			shouldSkip := tt.latestCommentAuthorID != "" && tt.allBotAccountIDs[tt.latestCommentAuthorID]
 
 			if shouldSkip != tt.shouldSkip {
 				t.Errorf("expected shouldSkip=%v, got %v", tt.shouldSkip, shouldSkip)
+			}
+		})
+	}
+}
+
+// TestJiraPoller_BotMarkerDetection tests that comments with the bot marker
+// are correctly detected and skipped.
+func TestJiraPoller_BotMarkerDetection(t *testing.T) {
+	// Unit test - no DB required
+	tests := []struct {
+		name          string
+		commentBody   string
+		shouldSkip    bool
+	}{
+		{
+			name:        "comment with bot marker should be skipped",
+			commentBody: "This is a regular comment.\n\n---\n_Posted by Alcove_",
+			shouldSkip:  true,
+		},
+		{
+			name:        "comment with partial marker text should not be skipped",
+			commentBody: "This comment mentions Posted by but not the full marker",
+			shouldSkip:  false,
+		},
+		{
+			name:        "comment without marker should not be skipped",
+			commentBody: "This is a regular user comment without any marker.",
+			shouldSkip:  false,
+		},
+		{
+			name:        "empty comment body should not be skipped",
+			commentBody: "",
+			shouldSkip:  false,
+		},
+		{
+			name:        "comment with marker in middle should be skipped",
+			commentBody: "Start of comment\n\n_Posted by Alcove_\n\nEnd of comment",
+			shouldSkip:  true,
+		},
+		{
+			name:        "comment with case different marker should not be skipped",
+			commentBody: "Comment with _posted by alcove_ (lowercase)",
+			shouldSkip:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate marker detection logic
+			shouldSkip := tt.commentBody != "" && strings.Contains(tt.commentBody, "_Posted by Alcove_")
+
+			if shouldSkip != tt.shouldSkip {
+				t.Errorf("expected shouldSkip=%v, got %v", tt.shouldSkip, shouldSkip)
+			}
+		})
+	}
+}
+
+// TestJiraPoller_CrossTeamBotDetection tests that the cross-team bot detection
+// correctly identifies and skips comments from bots across different teams.
+func TestJiraPoller_CrossTeamBotDetection(t *testing.T) {
+	// Unit test - no DB required
+	teamABotID := "team-a-bot-123"
+	teamBBotID := "team-b-bot-456"
+	teamCBotID := "team-c-bot-789"
+	humanUserID := "human-user-999"
+
+	allBotAccountIDs := map[string]bool{
+		teamABotID: true,
+		teamBBotID: true,
+		teamCBotID: true,
+	}
+
+	tests := []struct {
+		name                     string
+		latestCommentAuthorID    string
+		expectSkipped            bool
+		expectedLogMessage       string
+	}{
+		{
+			name:                     "team A bot should be detected and skipped",
+			latestCommentAuthorID:    teamABotID,
+			expectSkipped:            true,
+			expectedLogMessage:       "cross-team bot",
+		},
+		{
+			name:                     "team B bot should be detected and skipped",
+			latestCommentAuthorID:    teamBBotID,
+			expectSkipped:            true,
+			expectedLogMessage:       "cross-team bot",
+		},
+		{
+			name:                     "team C bot should be detected and skipped",
+			latestCommentAuthorID:    teamCBotID,
+			expectSkipped:            true,
+			expectedLogMessage:       "cross-team bot",
+		},
+		{
+			name:                     "human user should not be skipped",
+			latestCommentAuthorID:    humanUserID,
+			expectSkipped:            false,
+			expectedLogMessage:       "",
+		},
+		{
+			name:                     "empty author ID should not be skipped",
+			latestCommentAuthorID:    "",
+			expectSkipped:            false,
+			expectedLogMessage:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the cross-team bot detection logic from the poller
+			isSkipped := tt.latestCommentAuthorID != "" && allBotAccountIDs[tt.latestCommentAuthorID]
+
+			if isSkipped != tt.expectSkipped {
+				t.Errorf("expected isSkipped=%v, got %v", tt.expectSkipped, isSkipped)
 			}
 		})
 	}

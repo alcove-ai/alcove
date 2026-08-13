@@ -452,6 +452,53 @@ func (cs *CredentialStore) LookupProviderCredential(ctx context.Context, provide
 	return &c, nil
 }
 
+// SCMCredentialResult holds a decrypted SCM credential with team information.
+type SCMCredentialResult struct {
+	Token   string
+	TeamID  string
+	APIHost string
+}
+
+// AllSCMCredentials returns all decrypted SCM credentials for a given service
+// across all teams. This is used for cross-team bot detection in pollers.
+func (cs *CredentialStore) AllSCMCredentials(ctx context.Context, service string) ([]SCMCredentialResult, error) {
+	rows, err := cs.db.Query(ctx, `
+		SELECT credential, COALESCE(team_id::text, ''), COALESCE(api_host, '')
+		FROM provider_credentials
+		WHERE provider = $1 AND team_id IS NOT NULL
+		ORDER BY created_at DESC`,
+		service)
+	if err != nil {
+		return nil, fmt.Errorf("querying credentials for service %q: %w", service, err)
+	}
+	defer rows.Close()
+
+	var results []SCMCredentialResult
+	for rows.Next() {
+		var encrypted []byte
+		var teamID, apiHost string
+		if err := rows.Scan(&encrypted, &teamID, &apiHost); err != nil {
+			return nil, fmt.Errorf("scanning credential row: %w", err)
+		}
+
+		// Decrypt the credential
+		raw, err := decrypt(cs.key, encrypted)
+		if err != nil {
+			// Log warning but continue with other credentials
+			log.Printf("warning: failed to decrypt credential for team %s service %s: %v", teamID, service, err)
+			continue
+		}
+
+		results = append(results, SCMCredentialResult{
+			Token:   string(raw),
+			TeamID:  teamID,
+			APIHost: apiHost,
+		})
+	}
+
+	return results, rows.Err()
+}
+
 // ListDistinctProviders returns distinct LLM providers from the credential store,
 // mapped to internal.Provider structs. Excludes system and SCM credentials.
 func (cs *CredentialStore) ListDistinctProviders(ctx context.Context, teamID string) ([]Credential, error) {

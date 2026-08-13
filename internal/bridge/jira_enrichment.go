@@ -79,8 +79,8 @@ type JiraIssue struct {
 // JiraComments represents the comments response from JIRA
 type JiraComments struct {
 	Comments []struct {
-		ID     string `json:"id"`
-		Body   string `json:"body"`
+		ID     string          `json:"id"`
+		Body   json.RawMessage `json:"body"` // ADF format in JIRA Cloud API v2/v3
 		Author struct {
 			DisplayName string `json:"displayName"`
 			AccountID   string `json:"accountId"`
@@ -244,17 +244,18 @@ func (jp *JiraPoller) enrichJiraComments(ctx context.Context, token, issueKey st
 
 	var commentsText []string
 	for _, c := range comments.Comments {
-		comment := c.Body
-		if len(comment) > maxCommentLen {
-			comment = comment[:maxCommentLen] + "\n... (truncated)"
+		// Extract text from ADF body
+		commentText := extractADFText(c.Body)
+		if len(commentText) > maxCommentLen {
+			commentText = commentText[:maxCommentLen] + "\n... (truncated)"
 		}
 		dateStr := c.Created
 		if len(dateStr) >= 10 {
 			dateStr = dateStr[:10]
 		}
-		commentFormatted := fmt.Sprintf("%s (%s): %s", c.Author.DisplayName, dateStr, comment)
+		commentFormatted := fmt.Sprintf("%s (%s): %s", c.Author.DisplayName, dateStr, commentText)
 		commentsText = append(commentsText, commentFormatted)
-		sb.WriteString(fmt.Sprintf("**%s** (%s):\n%s\n\n", c.Author.DisplayName, dateStr, comment))
+		sb.WriteString(fmt.Sprintf("**%s** (%s):\n%s\n\n", c.Author.DisplayName, dateStr, commentText))
 	}
 
 	// Return formatted text and latest comment metadata (comments are ordered by -created, so [0] is latest)
