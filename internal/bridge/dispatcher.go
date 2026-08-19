@@ -320,7 +320,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 			}
 		}
 		if model == "" {
-			model = "claude-sonnet-4-6"
+			model = internal.DefaultModel
 		}
 	}
 

@@ -17,6 +17,15 @@ package internal
 
 import "time"
 
+// DefaultModel is the fallback model ID used when no model is set via an
+// agent definition's `model:` field, a request override, or a provider
+// env var (VERTEX_MODEL / ANTHROPIC_MODEL). It is a bare current-generation
+// ID: valid on both api.anthropic.com and Vertex AI (Vertex addresses
+// current-gen models by the bare ID; only dated snapshots use the "@date"
+// form). Keep every fallback pointing here so the default cannot drift
+// across call sites.
+const DefaultModel = "claude-sonnet-4-6"
+
 // RepoSpec declares a repository for multi-repo agent sessions.
 type RepoSpec struct {
 	Name string `json:"name,omitempty" yaml:"name,omitempty"`

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/alcove-ai/alcove/internal"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -176,7 +177,7 @@ func ResolveEffectiveLLM(cfg *Config) *EffectiveSystemLLM {
 		eff.Model = llm.Model
 		eff.ModelSrc = "config"
 	} else {
-		eff.Model = "claude-sonnet-4-6"
+		eff.Model = internal.DefaultModel
 		eff.ModelSrc = "default"
 	}
 	if llm.Region != "" {
