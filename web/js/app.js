@@ -2,6 +2,17 @@
 (function () {
     'use strict';
 
+    // Defense-in-depth: strip any credentials leaked into URL query params.
+    // This can happen if a password manager bypasses the JS submit handler via
+    // a programmatic form.submit() call (which skips the 'submit' event and
+    // e.preventDefault()). The SPA uses hash-based routing exclusively and
+    // never uses query params for legitimate navigation, so it is safe to
+    // unconditionally strip all query params on load.
+    if (window.location.search) {
+        window.history.replaceState(null, '',
+            window.location.pathname + window.location.hash);
+    }
+
     // Detect base path for subpath deployments (e.g., /app/alcove/)
     // When served at /, basePath is empty. When at /app/alcove/, basePath is '/app/alcove'.
     var basePath = (function() {
