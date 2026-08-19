@@ -625,7 +625,7 @@ func newRunCmd() *cobra.Command {
 	}
 	cmd.Flags().String("repo", "", "Target repository (e.g., org/repo)")
 	cmd.Flags().String("provider", "", "LLM provider name")
-	cmd.Flags().String("model", "", "Model override (e.g., claude-sonnet-4-20250514)")
+	cmd.Flags().String("model", "", "Model override (e.g., claude-sonnet-4-6)")
 	cmd.Flags().Float64("budget", 0, "Budget limit in USD (e.g., 5.00)")
 	cmd.Flags().Duration("timeout", 0, "Session timeout (e.g., 30m, 1h)")
 	cmd.Flags().Bool("watch", false, "Stream transcript via SSE after dispatch")
@@ -1567,7 +1567,7 @@ defaults:
   # provider: ""
 
   # Default model for 'run' command (optional)
-  # Example: "claude-sonnet-4-20250514", "gpt-4"
+  # Example: "claude-sonnet-4-6", "gpt-4"
   # model: ""
 
   # Default timeout for 'run' command (optional)

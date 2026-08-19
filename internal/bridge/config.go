@@ -275,14 +275,14 @@ func defaultProviders() []internal.Provider {
 		providers = append(providers, internal.Provider{
 			Name:  "vertex",
 			Type:  "google-vertex",
-			Model: envOrDefault("VERTEX_MODEL", "claude-sonnet-4-20250514"),
+			Model: envOrDefault("VERTEX_MODEL", internal.DefaultModel),
 		})
 	}
 	if os.Getenv("ANTHROPIC_API_KEY") != "" {
 		providers = append(providers, internal.Provider{
 			Name:  "anthropic",
 			Type:  "anthropic",
-			Model: envOrDefault("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+			Model: envOrDefault("ANTHROPIC_MODEL", internal.DefaultModel),
 		})
 	}
 
@@ -291,7 +291,7 @@ func defaultProviders() []internal.Provider {
 		providers = append(providers, internal.Provider{
 			Name:  "default",
 			Type:  "anthropic",
-			Model: "claude-sonnet-4-20250514",
+			Model: internal.DefaultModel,
 		})
 	}
 

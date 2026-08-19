@@ -310,7 +310,7 @@ func (p *Proxy) handleLLMRequest(w http.ResponseWriter, r *http.Request) {
 
 		model := reqBody.Model
 		if model == "" {
-			model = "claude-sonnet-4@20250514"
+			model = internal.DefaultModel
 		}
 
 		// Convert Anthropic model name format to Vertex format:
