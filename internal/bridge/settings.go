@@ -176,7 +176,7 @@ func ResolveEffectiveLLM(cfg *Config) *EffectiveSystemLLM {
 		eff.Model = llm.Model
 		eff.ModelSrc = "config"
 	} else {
-		eff.Model = "claude-sonnet-4-20250514"
+		eff.Model = "claude-sonnet-4-6"
 		eff.ModelSrc = "default"
 	}
 	if llm.Region != "" {
