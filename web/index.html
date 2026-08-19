@@ -32,14 +32,14 @@
                 <h1>Alcove</h1>
                 <p class="login-subtitle">Sandboxed AI Coding Agents</p>
             </div>
-            <form id="login-form" autocomplete="on">
+            <form id="login-form" method="post" action="javascript:void(0)" autocomplete="on">
                 <div class="form-group">
                     <label for="login-username">Username</label>
-                    <input type="text" id="login-username" name="username" required autofocus autocomplete="username">
+                    <input type="text" id="login-username" required autofocus autocomplete="username">
                 </div>
                 <div class="form-group">
                     <label for="login-password">Password</label>
-                    <input type="password" id="login-password" name="password" required autocomplete="current-password">
+                    <input type="password" id="login-password" required autocomplete="current-password">
                 </div>
                 <div id="login-error" class="error-message" role="alert" hidden></div>
                 <button type="submit" class="btn btn-primary btn-full">Sign In</button>
@@ -686,7 +686,7 @@
                     <button id="show-create-user" class="btn btn-small btn-primary">Create User</button>
                 </div>
                 <div id="create-user-form-container" class="form-card" hidden>
-                    <form id="create-user-form">
+                    <form id="create-user-form" method="post" action="javascript:void(0)">
                         <div class="form-row">
                             <div class="form-group form-group-half">
                                 <label for="new-user-username">Username <span class="required">*</span></label>
@@ -809,7 +809,7 @@
     <div id="change-password-modal" class="modal-overlay" hidden>
         <div class="modal-card">
             <h3>Change Password</h3>
-            <form id="change-password-form">
+            <form id="change-password-form" method="post" action="javascript:void(0)">
                 <div class="form-group">
                     <label for="cp-current">Current Password</label>
                     <input type="password" id="cp-current" class="input" required>
@@ -837,7 +837,7 @@
         <div class="modal-card">
             <h3>Reset Password</h3>
             <p class="form-help">Reset password for <strong id="reset-pw-username"></strong></p>
-            <form id="admin-reset-password-form">
+            <form id="admin-reset-password-form" method="post" action="javascript:void(0)">
                 <div id="reset-pw-error" class="error-message" role="alert" hidden></div>
                 <div class="form-group">
                     <label for="reset-pw-new">New Password <span class="required">*</span></label>
@@ -953,7 +953,7 @@ alcove list</pre>
     </div>
 
     <template id="credential-form-template">
-        <form>
+        <form method="post" action="javascript:void(0)">
             <div class="form-row">
                 <div class="form-group form-group-half" data-role="cred-name-group">
                     <label>Name <span class="required">*</span></label>
