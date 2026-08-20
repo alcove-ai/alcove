@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -613,4 +614,165 @@ func TestRetryWithBackoffContextCancellation(t *testing.T) {
 			t.Errorf("Expected fewer than 5 calls due to context timeout, got %d", callCount)
 		}
 	})
+}
+
+// TestPackUnpackReapedStatus tests round-trip encoding of WaitStatus values.
+func TestPackUnpackReapedStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     syscall.WaitStatus
+		wantReaped bool
+	}{
+		{
+			name:       "exit 0",
+			status:     syscall.WaitStatus(0),
+			wantReaped: true,
+		},
+		{
+			name:       "exit 1",
+			status:     syscall.WaitStatus(1 << 8),
+			wantReaped: true,
+		},
+		{
+			name:       "SIGKILL (signal 9)",
+			status:     syscall.WaitStatus(9),
+			wantReaped: true,
+		},
+		{
+			name:       "exit 2",
+			status:     syscall.WaitStatus(2 << 8),
+			wantReaped: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packed := packReapedStatus(tt.status)
+			reaped, unpacked := unpackReapedStatus(packed)
+
+			if reaped != tt.wantReaped {
+				t.Errorf("reaped: got %v, want %v", reaped, tt.wantReaped)
+			}
+			if unpacked != tt.status {
+				t.Errorf("status: got 0x%x, want 0x%x", uint32(unpacked), uint32(tt.status))
+			}
+		})
+	}
+
+	// Zero value means "not reaped"
+	t.Run("zero value not reaped", func(t *testing.T) {
+		reaped, _ := unpackReapedStatus(0)
+		if reaped {
+			t.Error("zero packed value should indicate not reaped")
+		}
+	})
+}
+
+// TestRecoverExitCode tests the ECHILD recovery helper.
+func TestRecoverExitCode(t *testing.T) {
+	// Helper to set a WaitStatus representing a normal exit with the given code.
+	makeExitStatus := func(code int) syscall.WaitStatus {
+		return syscall.WaitStatus(uint32(code) << 8)
+	}
+	// SIGKILL is signal 9; WaitStatus for signal death = signal number (low byte, high byte zero).
+	sigkillStatus := syscall.WaitStatus(9)
+
+	tests := []struct {
+		name         string
+		err          error
+		eventCount   int
+		setupAtomic  func()
+		wantExitCode int
+		wantOk       bool
+	}{
+		{
+			name:       "ECHILD + handler reaped with exit 0",
+			err:        syscall.ECHILD,
+			eventCount: 5,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(packReapedStatus(makeExitStatus(0)))
+			},
+			wantExitCode: 0,
+			wantOk:       true,
+		},
+		{
+			name:       "ECHILD + handler reaped with exit 1",
+			err:        syscall.ECHILD,
+			eventCount: 5,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(packReapedStatus(makeExitStatus(1)))
+			},
+			wantExitCode: 1,
+			wantOk:       true,
+		},
+		{
+			name:       "ECHILD + handler reaped with SIGKILL",
+			err:        syscall.ECHILD,
+			eventCount: 5,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(packReapedStatus(sigkillStatus))
+			},
+			wantExitCode: 128 + 9, // 137
+			wantOk:       true,
+		},
+		{
+			name:       "ECHILD + not reaped + eventCount > 0 (fast-exit race fallback)",
+			err:        syscall.ECHILD,
+			eventCount: 12,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(0)
+			},
+			wantExitCode: 0,
+			wantOk:       true,
+		},
+		{
+			name:       "ECHILD + not reaped + eventCount == 0 (silent crash)",
+			err:        syscall.ECHILD,
+			eventCount: 0,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(0)
+			},
+			wantExitCode: 1,
+			wantOk:       false,
+		},
+		{
+			name:       "non-ECHILD error passthrough",
+			err:        errors.New("some other error"),
+			eventCount: 5,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(0)
+			},
+			wantExitCode: 1,
+			wantOk:       false,
+		},
+		{
+			name:       "os.ErrPermission is not ECHILD",
+			err:        errors.New("permission denied"),
+			eventCount: 10,
+			setupAtomic: func() {
+				primaryReapedStatus.Store(packReapedStatus(makeExitStatus(0)))
+			},
+			wantExitCode: 1,
+			wantOk:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset atomic before each test.
+			primaryReapedStatus.Store(0)
+			if tt.setupAtomic != nil {
+				tt.setupAtomic()
+			}
+
+			gotCode, gotOk := recoverExitCode(tt.err, tt.eventCount)
+
+			if gotCode != tt.wantExitCode {
+				t.Errorf("exitCode: got %d, want %d", gotCode, tt.wantExitCode)
+			}
+			if gotOk != tt.wantOk {
+				t.Errorf("recovered: got %v, want %v", gotOk, tt.wantOk)
+			}
+		})
+	}
 }
