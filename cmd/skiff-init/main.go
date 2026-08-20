@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -48,6 +49,58 @@ var Version = "dev"
 // primaryChildPID tracks the main process PID to prevent the SIGCHLD zombie reaper
 // from racing with cmd.Wait() and losing the real exit code.
 var primaryChildPID atomic.Int64
+
+// primaryReapedStatus packs the reaper state into a single atomic to avoid
+// cross-variable ordering hazards. Bit 32 = reaped flag, bits 0-31 = WaitStatus.
+// Zero value means "not reaped by SIGCHLD handler".
+//
+// Race scenario: Wait4(-1, WNOHANG) in the SIGCHLD handler reaps any available child,
+// including the primary child, before the PID check on the next line. If the primary
+// child exits before primaryChildPID.Store() executes (fast-exiting processes < 3s),
+// the handler reaps it and cmd.Wait() gets ECHILD. This atomic captures the real
+// WaitStatus so recoverExitCode() can restore it.
+var primaryReapedStatus atomic.Int64
+
+// packReapedStatus packs a WaitStatus into the primaryReapedStatus atomic.
+// Bit 32 acts as the reaped flag; bits 0-31 hold the raw WaitStatus value.
+func packReapedStatus(status syscall.WaitStatus) int64 {
+	return (1 << 32) | int64(uint32(status))
+}
+
+// unpackReapedStatus unpacks the primaryReapedStatus atomic value.
+func unpackReapedStatus(packed int64) (reaped bool, status syscall.WaitStatus) {
+	return packed != 0, syscall.WaitStatus(uint32(packed))
+}
+
+// recoverExitCode handles cmd.Wait() errors in the SIGCHLD race scenario.
+// Returns the recovered exit code and whether recovery succeeded.
+// Only recovers from ECHILD — other errors are genuine failures.
+func recoverExitCode(err error, eventCount int) (exitCode int, recovered bool) {
+	// Only recover from ECHILD — other errors are genuine failures.
+	if !errors.Is(err, syscall.ECHILD) {
+		return 1, false
+	}
+	// Check if the SIGCHLD handler captured the real exit status.
+	if packed := primaryReapedStatus.Load(); packed != 0 {
+		_, ws := unpackReapedStatus(packed)
+		if ws.Exited() {
+			return ws.ExitStatus(), true
+		}
+		if ws.Signaled() {
+			return 128 + int(ws.Signal()), true
+		}
+		// Stopped or other — treat as error.
+		return 1, true
+	}
+	// Safety net: process produced output but we lost the exit code.
+	// Treat as success since the process ran and produced output.
+	if eventCount > 0 {
+		return 0, true
+	}
+	// Truly unknown failure — no output and no captured status.
+	// Preserve #476 behavior: silent exits are treated as errors.
+	return 1, false
+}
 
 // skillPluginDirs holds paths to cloned skill/agent repos for --plugin-dir flags.
 var skillPluginDirs []string
@@ -577,9 +630,16 @@ func runExecutable(
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			// After SIGCHLD fix, ECHILD should not occur. If it does, treat as error.
-			log.Printf("warning: unexpected cmd.Wait() error (ECHILD should not happen): %T: %v", err, err)
-			exitCode = 1
+			// cmd.Wait() returned a non-ExitError — check for ECHILD from the SIGCHLD race.
+			// The SIGCHLD handler may have reaped the primary child before cmd.Wait() could,
+			// causing ECHILD. recoverExitCode() restores the captured WaitStatus if available.
+			if recovered, ok2 := recoverExitCode(err, eventCount); ok2 {
+				log.Printf("recovered exit code from SIGCHLD handler: %d", recovered)
+				exitCode = recovered
+			} else {
+				log.Printf("warning: unexpected cmd.Wait() error: %T: %v", err, err)
+				exitCode = 1
+			}
 		}
 	}
 
@@ -799,7 +859,16 @@ func runClaude(
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			exitCode = 1
+			// cmd.Wait() returned a non-ExitError — check for ECHILD from the SIGCHLD race.
+			// The SIGCHLD handler may have reaped the primary child before cmd.Wait() could,
+			// causing ECHILD. recoverExitCode() restores the captured WaitStatus if available.
+			if recovered, ok2 := recoverExitCode(err, eventCount); ok2 {
+				log.Printf("recovered exit code from SIGCHLD handler: %d", recovered)
+				exitCode = recovered
+			} else {
+				log.Printf("warning: unexpected cmd.Wait() error: %T: %v", err, err)
+				exitCode = 1
+			}
 		}
 	}
 
@@ -1402,7 +1471,18 @@ func truncate(s string, n int) string {
 }
 
 func init() {
-	// As PID 1, we need to reap zombie children.
+	// As PID 1, we need to reap zombie children to prevent zombie accumulation.
+	//
+	// Race scenario (see primaryReapedStatus above):
+	// Wait4(-1, WNOHANG) reaps ANY available child, including the primary child,
+	// before the PID check below. Two sub-cases:
+	//
+	// (a) primaryChildPID is already set: pid matches, we capture the WaitStatus
+	//     into primaryReapedStatus, and recoverExitCode() restores the real exit code
+	//     when cmd.Wait() returns ECHILD.
+	//
+	// (b) primaryChildPID is still 0 (fast-exit race): pid != 0 so the match fails;
+	//     recoverExitCode() falls back to the eventCount > 0 safety net in this case.
 	sigCh := make(chan os.Signal, 16)
 	signal.Notify(sigCh, syscall.SIGCHLD)
 	go func() {
@@ -1413,9 +1493,12 @@ func init() {
 				if pid <= 0 || err != nil {
 					break
 				}
-				// Skip reaping the primary child process — let cmd.Wait() handle it
-				// to preserve the real exit code.
+				// If we reaped the primary child, capture its exit status so that
+				// recoverExitCode() can recover the real exit code when cmd.Wait()
+				// returns ECHILD (sub-case a above).
 				if pid == int(primaryChildPID.Load()) {
+					primaryReapedStatus.Store(packReapedStatus(status))
+					log.Printf("WARNING: SIGCHLD handler reaped primary child pid=%d status=0x%x", pid, uint32(status))
 					continue
 				}
 			}
