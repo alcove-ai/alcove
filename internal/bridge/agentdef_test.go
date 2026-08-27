@@ -502,7 +502,7 @@ func TestGetAgentDefinitionFieldCopyRoundTrip(t *testing.T) {
 			NetworkAccess: "external",
 		},
 		MCPServer:  "my-mcp-server",
-		MCPPlugins: []string{"plugin-a", "plugin-b"},
+		MCPPlugins: []string{"browser", "filesystem"},
 	}
 
 	// Step 2: Marshal to JSON (simulates UpsertAgentDefinition storing parsed JSONB).
@@ -740,61 +740,90 @@ repos:
 	}
 }
 
+// TestParseAgentDefinitionWithMCPServer verifies that mcp_server and mcp_plugins
+// parse correctly and appear in the resulting AgentDefinition.
 func TestParseAgentDefinitionWithMCPServer(t *testing.T) {
 	yamlData := `
 name: MCP Agent
-prompt: "Do something with MCP"
-mcp_server: my-mcp-server
+prompt: "Use browser tools"
+mcp_server: browser-mcp
 mcp_plugins:
-  - plugin-a
-  - plugin-b
+  - browser
+  - filesystem
 `
-	td, err := ParseAgentDefinition([]byte(yamlData))
+	def, err := ParseAgentDefinition([]byte(yamlData))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if td.MCPServer != "my-mcp-server" {
-		t.Errorf("MCPServer: got %q, want %q", td.MCPServer, "my-mcp-server")
+	if def.MCPServer != "browser-mcp" {
+		t.Errorf("MCPServer: got %q, want %q", def.MCPServer, "browser-mcp")
 	}
-	if len(td.MCPPlugins) != 2 {
-		t.Fatalf("expected 2 MCPPlugins, got %d", len(td.MCPPlugins))
+	if len(def.MCPPlugins) != 2 {
+		t.Fatalf("MCPPlugins length: got %d, want 2", len(def.MCPPlugins))
 	}
-	if td.MCPPlugins[0] != "plugin-a" {
-		t.Errorf("MCPPlugins[0]: got %q, want %q", td.MCPPlugins[0], "plugin-a")
+	if def.MCPPlugins[0] != "browser" {
+		t.Errorf("MCPPlugins[0]: got %q, want %q", def.MCPPlugins[0], "browser")
 	}
-	if td.MCPPlugins[1] != "plugin-b" {
-		t.Errorf("MCPPlugins[1]: got %q, want %q", td.MCPPlugins[1], "plugin-b")
+	if def.MCPPlugins[1] != "filesystem" {
+		t.Errorf("MCPPlugins[1]: got %q, want %q", def.MCPPlugins[1], "filesystem")
 	}
 }
 
+// TestParseAgentDefinitionMCPServerOnly verifies that mcp_server without mcp_plugins
+// is valid.
+func TestParseAgentDefinitionMCPServerOnly(t *testing.T) {
+	yamlData := `
+name: MCP Agent
+prompt: "Use tools"
+mcp_server: my-server
+`
+	def, err := ParseAgentDefinition([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if def.MCPServer != "my-server" {
+		t.Errorf("MCPServer: got %q, want %q", def.MCPServer, "my-server")
+	}
+	if len(def.MCPPlugins) != 0 {
+		t.Errorf("MCPPlugins: expected empty, got %v", def.MCPPlugins)
+	}
+}
+
+// TestParseAgentDefinitionMCPPluginsWithoutServer verifies that mcp_plugins
+// without mcp_server returns an error.
 func TestParseAgentDefinitionMCPPluginsWithoutServer(t *testing.T) {
 	yamlData := `
 name: Bad MCP Agent
 prompt: "Do something"
 mcp_plugins:
-  - plugin-a
+  - browser
 `
 	_, err := ParseAgentDefinition([]byte(yamlData))
 	if err == nil {
-		t.Fatal("expected error for mcp_plugins without mcp_server")
+		t.Fatal("expected error when mcp_plugins is set without mcp_server")
 	}
-	if !strings.Contains(err.Error(), "mcp_plugins requires mcp_server") {
-		t.Errorf("unexpected error message: %v", err)
+	if !strings.Contains(err.Error(), "mcp_plugins") || !strings.Contains(err.Error(), "mcp_server") {
+		t.Errorf("error should mention mcp_plugins and mcp_server, got: %v", err)
 	}
 }
 
-func TestToTaskRequestIncludesMCPServer(t *testing.T) {
-	td := &AgentDefinition{
+// TestToTaskRequestIncludesMCPFields verifies that ToTaskRequest() maps MCPServer
+// and MCPPlugins from AgentDefinition to TaskRequest.
+func TestToTaskRequestIncludesMCPFields(t *testing.T) {
+	def := &AgentDefinition{
 		Name:       "mcp-agent",
 		Prompt:     "Do something",
-		MCPServer:  "my-server",
-		MCPPlugins: []string{"plugin-x"},
+		MCPServer:  "browser-mcp",
+		MCPPlugins: []string{"browser", "filesystem"},
 	}
-	req := td.ToTaskRequest()
-	if req.MCPServer != "my-server" {
-		t.Errorf("MCPServer: got %q, want %q", req.MCPServer, "my-server")
+	req := def.ToTaskRequest()
+	if req.MCPServer != "browser-mcp" {
+		t.Errorf("TaskRequest.MCPServer: got %q, want %q", req.MCPServer, "browser-mcp")
 	}
-	if len(req.MCPPlugins) != 1 || req.MCPPlugins[0] != "plugin-x" {
-		t.Errorf("MCPPlugins: got %v, want [plugin-x]", req.MCPPlugins)
+	if len(req.MCPPlugins) != 2 {
+		t.Fatalf("TaskRequest.MCPPlugins length: got %d, want 2", len(req.MCPPlugins))
+	}
+	if req.MCPPlugins[0] != "browser" || req.MCPPlugins[1] != "filesystem" {
+		t.Errorf("TaskRequest.MCPPlugins: got %v, want [browser filesystem]", req.MCPPlugins)
 	}
 }

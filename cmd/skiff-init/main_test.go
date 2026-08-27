@@ -776,213 +776,163 @@ func TestRecoverExitCode(t *testing.T) {
 		})
 	}
 }
-func TestConfigureClaude_MCPServerURL(t *testing.T) {
-	// Set up a temp home directory
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("MCP_SERVER_URL", "http://localhost:3000/sse")
-	t.Setenv("MCP_SERVER_NAME", "")
-	t.Setenv("ALCOVE_MCP_CONFIG", "")
-
-	configureClaude("")
-
-	// Read the written file
-	configPath := filepath.Join(homeDir, ".claude.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("reading .claude.json: %v", err)
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("parsing .claude.json: %v", err)
-	}
-
-	mcpServers, ok := result["mcpServers"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcpServers not found or wrong type")
-	}
-
-	// Default server name is "mcp-server"
-	server, ok := mcpServers["mcp-server"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcp-server entry not found or wrong type")
-	}
-	if server["url"] != "http://localhost:3000/sse" {
-		t.Errorf("url: got %q, want %q", server["url"], "http://localhost:3000/sse")
-	}
-}
-
-func TestConfigureClaude_MCPServerURL_CustomName(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("MCP_SERVER_URL", "http://localhost:8080/sse")
-	t.Setenv("MCP_SERVER_NAME", "my-custom-server")
-	t.Setenv("ALCOVE_MCP_CONFIG", "")
-
-	configureClaude("")
-
-	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
-	if err != nil {
-		t.Fatalf("reading .claude.json: %v", err)
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("parsing .claude.json: %v", err)
-	}
-
-	mcpServers := result["mcpServers"].(map[string]any)
-	server, ok := mcpServers["my-custom-server"].(map[string]any)
-	if !ok {
-		t.Fatalf("my-custom-server entry not found")
-	}
-	if server["url"] != "http://localhost:8080/sse" {
-		t.Errorf("url: got %q, want %q", server["url"], "http://localhost:8080/sse")
-	}
-}
-
+// TestConfigureClaude_NoMCPServerURL verifies that configureClaude writes the onboarding
+// flag but no mcpServers entry when MCP_SERVER_URL is not set.
 func TestConfigureClaude_NoMCPServerURL(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("MCP_SERVER_URL", "")
-	t.Setenv("MCP_SERVER_NAME", "")
-	t.Setenv("ALCOVE_MCP_CONFIG", "")
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 
-	configureClaude("")
+	configureClaude("", "", "")
 
-	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
+	data, err := os.ReadFile(filepath.Join(dir, ".claude.json"))
 	if err != nil {
-		t.Fatalf("reading .claude.json: %v", err)
+		t.Fatalf("read .claude.json: %v", err)
 	}
-
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("parsing .claude.json: %v", err)
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal .claude.json: %v", err)
 	}
-
-	if _, exists := result["mcpServers"]; exists {
-		t.Error("mcpServers should not be present when MCP_SERVER_URL is not set")
+	if _, ok := cfg["mcpServers"]; ok {
+		t.Error("expected no mcpServers when MCP_SERVER_URL is not set")
+	}
+	if cfg["hasCompletedOnboarding"] != true {
+		t.Errorf("hasCompletedOnboarding: got %v, want true", cfg["hasCompletedOnboarding"])
 	}
 }
 
-func TestConfigureClaude_MergeWithALCOVE_MCP_CONFIG(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("MCP_SERVER_URL", "http://localhost:3000/sse")
-	t.Setenv("MCP_SERVER_NAME", "dynamic-server")
-	t.Setenv("ALCOVE_MCP_CONFIG", "")
+// TestConfigureClaude_MCPServerURL verifies that configureClaude writes an SSE entry
+// into mcpServers when MCP_SERVER_URL is set.
+func TestConfigureClaude_MCPServerURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 
-	// Simulate ALCOVE_MCP_CONFIG with an existing entry
-	existingConfig := `{"existing-server": {"url": "http://localhost:9000/sse"}}`
-	configureClaude(existingConfig)
+	configureClaude("", "http://localhost:3000", "my-mcp")
 
-	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
+	data, err := os.ReadFile(filepath.Join(dir, ".claude.json"))
 	if err != nil {
-		t.Fatalf("reading .claude.json: %v", err)
+		t.Fatalf("read .claude.json: %v", err)
 	}
-
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("parsing .claude.json: %v", err)
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal .claude.json: %v", err)
 	}
-
-	mcpServers, ok := result["mcpServers"].(map[string]any)
+	servers, ok := cfg["mcpServers"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("mcpServers not found")
+		t.Fatalf("mcpServers is missing or wrong type: %T", cfg["mcpServers"])
 	}
-
-	if _, ok := mcpServers["existing-server"]; !ok {
-		t.Error("existing-server from ALCOVE_MCP_CONFIG should be preserved")
+	entry, ok := servers["my-mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcpServers[\"my-mcp\"] is missing or wrong type: %T", servers["my-mcp"])
 	}
-	if _, ok := mcpServers["dynamic-server"]; !ok {
-		t.Error("dynamic-server from MCP_SERVER_URL should be added")
+	if entry["url"] != "http://localhost:3000" {
+		t.Errorf("url: got %q, want %q", entry["url"], "http://localhost:3000")
+	}
+	if entry["type"] != "sse" {
+		t.Errorf("type: got %q, want %q", entry["type"], "sse")
 	}
 }
 
-// TestValidateMCPServerURL verifies URL validation for MCP_SERVER_URL.
+// TestConfigureClaude_DefaultMCPServerName verifies that mcp-server is the default name.
+func TestConfigureClaude_DefaultMCPServerName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	configureClaude("", "http://localhost:3000", "")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("read .claude.json: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal .claude.json: %v", err)
+	}
+	servers, ok := cfg["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcpServers missing or wrong type")
+	}
+	if _, ok := servers["mcp-server"]; !ok {
+		t.Error("expected default server name 'mcp-server'")
+	}
+}
+
+// TestConfigureClaude_MergeWithALCOVE_MCP_CONFIG verifies that entries from
+// ALCOVE_MCP_CONFIG and MCP_SERVER_URL are merged in mcpServers.
+func TestConfigureClaude_MergeWithALCOVE_MCP_CONFIG(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	alcoveMCPConfig := `{"existing-server": {"url": "http://localhost:9000"}}`
+	configureClaude(alcoveMCPConfig, "http://localhost:3000", "new-server")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("read .claude.json: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal .claude.json: %v", err)
+	}
+	servers, ok := cfg["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcpServers missing or wrong type")
+	}
+	if _, ok := servers["existing-server"]; !ok {
+		t.Error("expected 'existing-server' from ALCOVE_MCP_CONFIG to be present")
+	}
+	if _, ok := servers["new-server"]; !ok {
+		t.Error("expected 'new-server' from MCP_SERVER_URL to be present")
+	}
+}
+
+// TestConfigureClaude_InvalidMCPServerURL verifies that an invalid MCP_SERVER_URL
+// is rejected gracefully (warning logged, no entry written).
+func TestConfigureClaude_InvalidMCPServerURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// This URL has userinfo which should be rejected.
+	configureClaude("", "http://user@evil.com/mcp", "")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("read .claude.json: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal .claude.json: %v", err)
+	}
+	if _, ok := cfg["mcpServers"]; ok {
+		t.Error("expected no mcpServers for invalid MCP_SERVER_URL")
+	}
+}
+
+// TestValidateMCPServerURL verifies URL validation for MCP server URLs.
 func TestValidateMCPServerURL(t *testing.T) {
-	cases := []struct {
-		url     string
+	tests := []struct {
+		name    string
+		rawURL  string
 		wantErr bool
 	}{
-		// Valid localhost URLs
-		{"http://localhost:3000/sse", false},
-		{"https://localhost:8443/mcp", false},
-		{"http://localhost/", false},
-		{"http://127.0.0.1:3000/sse", false},
-		// Invalid: non-localhost hosts
-		{"http://example.com/mcp", true},
-		{"http://internal-mcp-server/sse", true},
-		{"http://10.0.0.1:3000/mcp", true},
-		// Invalid: missing/wrong scheme
-		{"ftp://localhost/sse", true},
-		{"ws://localhost:3000/sse", true},
-		{"localhost:3000/sse", true},
-		// Empty
-		{"", true},
-		// Invalid: userinfo injection — http://localhost:3000@evil.com/mcp routes to evil.com.
-		// Using net/url.Parse() correctly identifies evil.com as the host.
-		{"http://localhost:3000@evil.com/mcp", true},
-		{"http://user:pass@localhost/mcp", true},
+		{"valid http", "http://localhost:3000", false},
+		{"valid https", "https://mcp.example.com/sse", false},
+		{"valid http with path", "http://localhost:3000/mcp/sse", false},
+		{"invalid scheme ftp", "ftp://localhost/mcp", true},
+		{"no scheme", "localhost:3000", true},
+		{"userinfo injection", "http://user@evil.com/mcp", true},
+		{"userinfo with pass", "http://user:pass@evil.com/mcp", true},
+		{"empty string", "", true},
+		{"no host", "http:///path", true},
 	}
-	for _, tc := range cases {
-		err := validateMCPServerURL(tc.url)
-		if tc.wantErr && err == nil {
-			t.Errorf("validateMCPServerURL(%q): expected error, got nil", tc.url)
-		}
-		if !tc.wantErr && err != nil {
-			t.Errorf("validateMCPServerURL(%q): unexpected error: %v", tc.url, err)
-		}
-	}
-}
-
-// TestConfigureClaude_InvalidMCPServerURL verifies that a non-localhost URL is rejected
-// and not written to ~/.claude.json.
-func TestConfigureClaude_InvalidMCPServerURL(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("MCP_SERVER_URL", "http://remote-mcp.example.com/sse")
-	t.Setenv("MCP_SERVER_NAME", "bad-server")
-
-	configureClaude("")
-
-	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
-	if err != nil {
-		t.Fatalf("reading .claude.json: %v", err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("parsing .claude.json: %v", err)
-	}
-	if _, ok := result["mcpServers"]; ok {
-		t.Errorf("expected no mcpServers for invalid (non-localhost) MCP_SERVER_URL")
-	}
-}
-
-// TestConfigureClaude_MCPToolFilterNotLogged verifies that MCP_TOOL_FILTER is not read
-// or logged (it is a data-model placeholder; enforcement is deferred to Issue B/Gate).
-// This test simply verifies the function completes without error when MCP_TOOL_FILTER is
-// set — the value should be silently ignored.
-func TestConfigureClaude_MCPToolFilterIgnored(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("MCP_SERVER_URL", "")
-	t.Setenv("MCP_TOOL_FILTER", "browser.*,search.*")
-
-	// Should not panic or fail
-	configureClaude("")
-
-	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
-	if err != nil {
-		t.Fatalf("reading .claude.json: %v", err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("parsing .claude.json: %v", err)
-	}
-	// onboarding flag should always be set
-	if v, _ := result["hasCompletedOnboarding"].(bool); !v {
-		t.Error("hasCompletedOnboarding should be true")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validateMCPServerURL(tt.rawURL)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for URL %q, got nil", tt.rawURL)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for URL %q: %v", tt.rawURL, err)
+			}
+		})
 	}
 }

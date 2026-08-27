@@ -1469,15 +1469,17 @@ workflow:
 	}
 }
 
+// TestParseWorkflowDefinitionWithMCPFields verifies that mcp_tools and mcp_failure
+// parse correctly on a workflow step.
 func TestParseWorkflowDefinitionWithMCPFields(t *testing.T) {
 	yamlData := `
 name: MCP Workflow
 workflow:
-  - id: analyze
-    agent: mcp-agent
+  - id: browse
+    agent: browser-agent
     mcp_tools:
       - browser.*
-      - search_web
+      - filesystem.read
     mcp_failure: continue
 `
 	wd, err := ParseWorkflowDefinition([]byte(yamlData))
@@ -1486,52 +1488,62 @@ workflow:
 	}
 	step := wd.Workflow[0]
 	if len(step.MCPTools) != 2 {
-		t.Fatalf("expected 2 MCPTools, got %d", len(step.MCPTools))
+		t.Fatalf("MCPTools length: got %d, want 2", len(step.MCPTools))
 	}
 	if step.MCPTools[0] != "browser.*" {
 		t.Errorf("MCPTools[0]: got %q, want %q", step.MCPTools[0], "browser.*")
 	}
-	if step.MCPTools[1] != "search_web" {
-		t.Errorf("MCPTools[1]: got %q, want %q", step.MCPTools[1], "search_web")
+	if step.MCPTools[1] != "filesystem.read" {
+		t.Errorf("MCPTools[1]: got %q, want %q", step.MCPTools[1], "filesystem.read")
 	}
 	if step.MCPFailure != "continue" {
 		t.Errorf("MCPFailure: got %q, want %q", step.MCPFailure, "continue")
 	}
 }
 
+// TestMCPFailureValidation verifies that mcp_failure is validated as an enum.
 func TestMCPFailureValidation(t *testing.T) {
 	tests := []struct {
-		name      string
-		value     string
-		wantError bool
+		name       string
+		mcpFailure string
+		wantErr    bool
 	}{
-		{"empty (valid)", "", false},
-		{"fail (valid)", "fail", false},
-		{"continue (valid)", "continue", false},
-		{"invalid value", "ignore", true},
+		{"empty (default)", "", false},
+		{"fail", "fail", false},
+		{"continue", "continue", false},
+		{"invalid", "ignore", true},
 		{"invalid uppercase", "FAIL", true},
+		{"invalid partial", "cont", true},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			yamlData := `
 name: Test Workflow
 workflow:
   - id: step1
-    agent: test-agent
-    mcp_failure: ` + tc.value + `
+    agent: some-agent
+    mcp_failure: ` + tt.mcpFailure
+			// Empty mcpFailure requires a different YAML (omit the field)
+			if tt.mcpFailure == "" {
+				yamlData = `
+name: Test Workflow
+workflow:
+  - id: step1
+    agent: some-agent
 `
-			_, err := ParseWorkflowDefinition([]byte(yamlData))
-			if tc.wantError && err == nil {
-				t.Errorf("expected error for mcp_failure=%q but got none", tc.value)
 			}
-			if !tc.wantError && err != nil {
-				t.Errorf("unexpected error for mcp_failure=%q: %v", tc.value, err)
+			_, err := ParseWorkflowDefinition([]byte(yamlData))
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for mcp_failure=%q, got nil", tt.mcpFailure)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for mcp_failure=%q: %v", tt.mcpFailure, err)
 			}
 		})
 	}
 }
 
+// TestMatchMCPTool verifies the MatchMCPTool function.
 func TestMatchMCPTool(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1539,22 +1551,24 @@ func TestMatchMCPTool(t *testing.T) {
 		toolName string
 		want     bool
 	}{
-		{"exact match", "search_web", "search_web", true},
-		{"exact no match", "search_web", "browser_navigate", false},
-		{"wildcard prefix match", "browser.*", "browser.navigate", true},
-		{"wildcard prefix match 2", "browser.*", "browser.screenshot", true},
-		{"wildcard no match different prefix", "browser.*", "search_web", false},
-		{"wildcard no match partial prefix", "brows.*", "browser.navigate", false},
-		{"empty pattern no match", "", "search_web", false},
-		{"empty tool no match", "browser.*", "", false},
-		{"wildcard matches dot prefix only", "browser.*", "browserNavigate", false},
+		{"exact match", "browser.click", "browser.click", true},
+		{"exact no match", "browser.click", "browser.navigate", false},
+		{"wildcard matches prefix", "browser.*", "browser.click", true},
+		{"wildcard matches another", "browser.*", "browser.navigate", true},
+		{"wildcard no match different prefix", "browser.*", "filesystem.read", false},
+		{"wildcard no match bare prefix", "browser.*", "browser", false},
+		{"wildcard with sub-prefix", "filesystem.*", "filesystem.read", true},
+		{"empty pattern", "", "browser.click", false},
+		{"empty tool name", "browser.*", "", false},
+		{"both empty", "", "", true},
+		{"star only pattern", "*", "anything", false},
+		{"wildcard matches literal dot-star tool", "browser.*", "browser.*", true}, // "browser.*" starts with "browser."
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := MatchMCPTool(tc.pattern, tc.toolName)
-			if got != tc.want {
-				t.Errorf("MatchMCPTool(%q, %q) = %v, want %v", tc.pattern, tc.toolName, got, tc.want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchMCPTool(tt.pattern, tt.toolName)
+			if got != tt.want {
+				t.Errorf("MatchMCPTool(%q, %q) = %v, want %v", tt.pattern, tt.toolName, got, tt.want)
 			}
 		})
 	}

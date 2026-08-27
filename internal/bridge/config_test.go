@@ -20,111 +20,149 @@ import (
 	"testing"
 )
 
-func TestParseConfigFile_EmptyMCPSection(t *testing.T) {
+func TestParseConfigFile_NoMCPSection(t *testing.T) {
 	yaml := `
 database_encryption_key: test-key
+nats_url: nats://localhost:4222
 `
-	tmpFile := writeTempYAML(t, yaml)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alcove.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 
 	cfg := &Config{}
-	if err := cfg.parseConfigFile(tmpFile); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := cfg.parseConfigFile(path); err != nil {
+		t.Fatalf("parseConfigFile: %v", err)
 	}
-	if len(cfg.MCPServers) != 0 {
-		t.Errorf("expected no MCPServers, got %d", len(cfg.MCPServers))
+	if cfg.MCPServers != nil {
+		t.Errorf("expected MCPServers to be nil when mcp section is absent, got %v", cfg.MCPServers)
 	}
 }
 
-func TestParseConfigFile_ValidMCPSection(t *testing.T) {
+func TestParseConfigFile_EmptyMCPSection(t *testing.T) {
+	yaml := `
+database_encryption_key: test-key
+mcp:
+  servers: {}
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alcove.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg := &Config{}
+	if err := cfg.parseConfigFile(path); err != nil {
+		t.Fatalf("parseConfigFile: %v", err)
+	}
+	// An empty map in YAML results in a non-nil but empty map; len should be 0.
+	if len(cfg.MCPServers) != 0 {
+		t.Errorf("expected 0 MCP servers for empty section, got %d", len(cfg.MCPServers))
+	}
+}
+
+func TestParseConfigFile_ValidMCPServer(t *testing.T) {
 	yaml := `
 database_encryption_key: test-key
 mcp:
   servers:
-    my-server:
-      image: quay.io/myorg/mcp-server:v1.0
+    browser-mcp:
+      image: quay.io/alcove/browser-mcp:latest
       allowed_versions:
-        - v1.0
-        - v1.1
-      env:
-        LOG_LEVEL: debug
+        - "1.0"
+        - "1.1"
+      allowed_plugins:
+        browser:
+          tools:
+            - click
+            - navigate
       resource_limits:
         cpu_request: "100m"
         memory_request: "128Mi"
         cpu_limit: "500m"
         memory_limit: "512Mi"
+      env:
+        LOG_LEVEL: debug
 `
-	tmpFile := writeTempYAML(t, yaml)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alcove.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 
 	cfg := &Config{}
-	if err := cfg.parseConfigFile(tmpFile); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := cfg.parseConfigFile(path); err != nil {
+		t.Fatalf("parseConfigFile: %v", err)
 	}
+
 	if len(cfg.MCPServers) != 1 {
-		t.Fatalf("expected 1 MCPServer, got %d", len(cfg.MCPServers))
+		t.Fatalf("expected 1 MCP server, got %d", len(cfg.MCPServers))
 	}
-	srv, ok := cfg.MCPServers["my-server"]
+
+	server, ok := cfg.MCPServers["browser-mcp"]
 	if !ok {
-		t.Fatal("expected 'my-server' in MCPServers")
+		t.Fatal("expected 'browser-mcp' server to be present")
 	}
-	if srv.Image != "quay.io/myorg/mcp-server:v1.0" {
-		t.Errorf("Image: got %q, want %q", srv.Image, "quay.io/myorg/mcp-server:v1.0")
+	if server.Image != "quay.io/alcove/browser-mcp:latest" {
+		t.Errorf("Image: got %q, want %q", server.Image, "quay.io/alcove/browser-mcp:latest")
 	}
-	if len(srv.AllowedVersions) != 2 {
-		t.Errorf("AllowedVersions: got %d, want 2", len(srv.AllowedVersions))
+	if len(server.AllowedVersions) != 2 {
+		t.Errorf("AllowedVersions length: got %d, want 2", len(server.AllowedVersions))
 	}
-	if srv.Env["LOG_LEVEL"] != "debug" {
-		t.Errorf("Env[LOG_LEVEL]: got %q, want %q", srv.Env["LOG_LEVEL"], "debug")
+	if server.ResourceLimits.CPURequest != "100m" {
+		t.Errorf("CPURequest: got %q, want %q", server.ResourceLimits.CPURequest, "100m")
 	}
-	if srv.ResourceLimits.CPURequest != "100m" {
-		t.Errorf("ResourceLimits.CPURequest: got %q, want %q", srv.ResourceLimits.CPURequest, "100m")
+	if server.ResourceLimits.MemoryLimit != "512Mi" {
+		t.Errorf("MemoryLimit: got %q, want %q", server.ResourceLimits.MemoryLimit, "512Mi")
 	}
-	if srv.ResourceLimits.MemoryLimit != "512Mi" {
-		t.Errorf("ResourceLimits.MemoryLimit: got %q, want %q", srv.ResourceLimits.MemoryLimit, "512Mi")
+
+	plugin, ok := server.AllowedPlugins["browser"]
+	if !ok {
+		t.Fatal("expected 'browser' plugin in AllowedPlugins")
+	}
+	if len(plugin.Tools) != 2 {
+		t.Fatalf("plugin.Tools length: got %d, want 2", len(plugin.Tools))
+	}
+	if plugin.Tools[0] != "click" || plugin.Tools[1] != "navigate" {
+		t.Errorf("plugin.Tools: got %v, want [click navigate]", plugin.Tools)
+	}
+
+	if server.Env["LOG_LEVEL"] != "debug" {
+		t.Errorf("Env[LOG_LEVEL]: got %q, want %q", server.Env["LOG_LEVEL"], "debug")
 	}
 }
 
-func TestParseConfigFile_MCPWithAllowedPlugins(t *testing.T) {
+func TestParseConfigFile_MultipleMCPServers(t *testing.T) {
 	yaml := `
 database_encryption_key: test-key
 mcp:
   servers:
-    my-server:
-      image: quay.io/myorg/mcp-server:latest
-      allowed_plugins:
-        browser:
-          tools:
-            - navigate
-            - screenshot
-        search:
-          tools:
-            - web_search
+    server-a:
+      image: quay.io/alcove/server-a:v1
+    server-b:
+      image: quay.io/alcove/server-b:v2
+      allowed_versions:
+        - "2.0"
 `
-	tmpFile := writeTempYAML(t, yaml)
-
-	cfg := &Config{}
-	if err := cfg.parseConfigFile(tmpFile); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	srv := cfg.MCPServers["my-server"]
-	if len(srv.AllowedPlugins) != 2 {
-		t.Fatalf("expected 2 AllowedPlugins, got %d", len(srv.AllowedPlugins))
-	}
-	browserPlugin, ok := srv.AllowedPlugins["browser"]
-	if !ok {
-		t.Fatal("expected 'browser' in AllowedPlugins")
-	}
-	if len(browserPlugin.Tools) != 2 {
-		t.Errorf("browser.Tools: got %d, want 2", len(browserPlugin.Tools))
-	}
-}
-
-// writeTempYAML writes the given YAML content to a temp file and returns its path.
-func writeTempYAML(t *testing.T, content string) string {
-	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "alcove.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("writing temp yaml: %v", err)
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
-	return path
+
+	cfg := &Config{}
+	if err := cfg.parseConfigFile(path); err != nil {
+		t.Fatalf("parseConfigFile: %v", err)
+	}
+
+	if len(cfg.MCPServers) != 2 {
+		t.Fatalf("expected 2 MCP servers, got %d", len(cfg.MCPServers))
+	}
+	if _, ok := cfg.MCPServers["server-a"]; !ok {
+		t.Error("expected 'server-a' in MCPServers")
+	}
+	if _, ok := cfg.MCPServers["server-b"]; !ok {
+		t.Error("expected 'server-b' in MCPServers")
+	}
 }

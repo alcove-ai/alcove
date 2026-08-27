@@ -26,28 +26,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// MCPPluginConfig holds allowed-tool configuration for an MCP plugin.
-type MCPPluginConfig struct {
-	Tools []string `yaml:"tools"`
-}
-
-// MCPResourceLimits holds Kubernetes resource limit/request values for an MCP server container.
-type MCPResourceLimits struct {
-	CPURequest    string `yaml:"cpu_request"`
-	MemoryRequest string `yaml:"memory_request"`
-	CPULimit      string `yaml:"cpu_limit"`
-	MemoryLimit   string `yaml:"memory_limit"`
-}
-
-// MCPServerConfig holds operator-level configuration for a single MCP server.
-type MCPServerConfig struct {
-	Image           string                     `yaml:"image"`
-	AllowedVersions []string                   `yaml:"allowed_versions"`
-	AllowedPlugins  map[string]MCPPluginConfig  `yaml:"allowed_plugins"`
-	ResourceLimits  MCPResourceLimits          `yaml:"resource_limits"`
-	Env             map[string]string          `yaml:"env"`
-}
-
 // Config holds all Bridge configuration.
 type Config struct {
 	HailURL       string
@@ -72,8 +50,35 @@ type Config struct {
 	// when using the openshift-oauth auth backend.
 	OpenShiftOAuthAdmins []string
 
-	// MCPServers holds the operator-configured MCP server definitions.
+	// MCPServers is the operator-configured map of allowed MCP servers.
+	// Keyed by server name as defined in the mcp.servers section of alcove.yaml.
+	// TODO(Issue B): used by dispatcher to resolve MCPServer references from agent definitions.
 	MCPServers map[string]MCPServerConfig
+}
+
+// MCPPluginConfig configures which tools a plugin exposes via an MCP server.
+type MCPPluginConfig struct {
+	Tools []string `yaml:"tools"`
+}
+
+// MCPResourceLimits sets CPU and memory constraints for an MCP server container.
+type MCPResourceLimits struct {
+	CPURequest    string `yaml:"cpu_request"`
+	MemoryRequest string `yaml:"memory_request"`
+	CPULimit      string `yaml:"cpu_limit"`
+	MemoryLimit   string `yaml:"memory_limit"`
+}
+
+// MCPServerConfig is the operator-level configuration for a single MCP server.
+// It is defined under the mcp.servers section of alcove.yaml.
+type MCPServerConfig struct {
+	Image           string                     `yaml:"image"`
+	AllowedVersions []string                   `yaml:"allowed_versions"`
+	AllowedPlugins  map[string]MCPPluginConfig  `yaml:"allowed_plugins"`
+	ResourceLimits  MCPResourceLimits           `yaml:"resource_limits"`
+	// Env supplies extra environment variables to the MCP server container.
+	// Note: operators must not override Gate/Skiff security-critical env vars here.
+	Env map[string]string `yaml:"env"`
 }
 
 // SystemLLMConfig holds configuration for the Bridge system LLM.

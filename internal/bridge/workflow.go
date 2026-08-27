@@ -62,8 +62,13 @@ type WorkflowStep struct {
 	Credentials    map[string]string      `json:"credentials,omitempty" yaml:"credentials,omitempty"`
 	DirectOutbound bool                   `json:"direct_outbound,omitempty" yaml:"direct_outbound,omitempty"`
 	OutputContract *OutputContract        `json:"output_contract,omitempty" yaml:"output_contract,omitempty"`
-	MCPTools       []string               `json:"mcp_tools,omitempty" yaml:"mcp_tools,omitempty"`
-	MCPFailure     string                 `json:"mcp_failure,omitempty" yaml:"mcp_failure,omitempty"`
+	// MCPTools lists the MCP tool patterns (exact name or "prefix.*" glob) that this
+	// step is allowed to invoke. Empty means no MCP tool restriction.
+	// TODO(Issue B): workflow engine enforces MCPTools against actual MCP tool calls.
+	MCPTools []string `json:"mcp_tools,omitempty" yaml:"mcp_tools,omitempty"`
+	// MCPFailure controls what happens when an MCP tool call fails.
+	// Valid values: "" (default, same as "fail"), "fail", "continue".
+	MCPFailure string `json:"mcp_failure,omitempty" yaml:"mcp_failure,omitempty"`
 }
 
 // WorkflowTrigger defines when a workflow should be triggered.
@@ -237,9 +242,12 @@ func validateWorkflowSteps(steps []WorkflowStep) error {
 			return fmt.Errorf("workflow step '%s' has invalid max_iterations: must be positive", step.ID)
 		}
 
-		// Validate mcp_failure enum value.
-		if step.MCPFailure != "" && step.MCPFailure != "fail" && step.MCPFailure != "continue" {
-			return fmt.Errorf("workflow step '%s' has invalid mcp_failure %q (must be \"fail\" or \"continue\")", step.ID, step.MCPFailure)
+		// Validate mcp_failure enum.
+		switch step.MCPFailure {
+		case "", "fail", "continue":
+			// valid
+		default:
+			return fmt.Errorf("workflow step '%s' has invalid mcp_failure value %q (must be \"fail\" or \"continue\")", step.ID, step.MCPFailure)
 		}
 
 		// Backward compat: if Needs is populated and Depends is empty, auto-generate Depends.
@@ -528,6 +536,20 @@ func isValidIdentifier(s string) bool {
 		}
 	}
 	return true
+}
+
+// MatchMCPTool reports whether toolName matches the given pattern.
+// Two pattern forms are supported:
+//
+//   - Exact match: pattern == toolName
+//   - Prefix glob: pattern ends with ".*" — matches any tool whose name starts with the prefix followed by "."
+//     e.g., "browser.*" matches "browser.click" and "browser.navigate" but not "browser".
+func MatchMCPTool(pattern, toolName string) bool {
+	if strings.HasSuffix(pattern, ".*") {
+		prefix := pattern[:len(pattern)-2]
+		return strings.HasPrefix(toolName, prefix+".")
+	}
+	return pattern == toolName
 }
 
 // checkCircularDependencies uses depth-first search to detect circular dependencies.
@@ -977,16 +999,4 @@ func validateOutputContract(contract *OutputContract) error {
 	}
 
 	return nil
-}
-
-// MatchMCPTool reports whether toolName matches the given pattern.
-// Pattern may be an exact tool name (e.g. "browser_navigate") or a
-// prefix wildcard of the form "prefix.*" (e.g. "browser.*"), which
-// matches any tool whose name starts with "prefix.".
-func MatchMCPTool(pattern, toolName string) bool {
-	if strings.HasSuffix(pattern, ".*") {
-		prefix := pattern[:len(pattern)-2]
-		return strings.HasPrefix(toolName, prefix+".")
-	}
-	return pattern == toolName
 }

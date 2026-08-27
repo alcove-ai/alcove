@@ -72,8 +72,12 @@ type AgentDefinition struct {
 	TripleTeam      bool                     `json:"triple_team,omitempty" yaml:"triple_team"`
 	EnforcementMode string                  `json:"enforcement_mode,omitempty" yaml:"enforcement_mode"`
 	DevContainer    *DevContainerSpec       `json:"dev_container,omitempty" yaml:"dev_container"`
-	MCPServer       string                  `json:"mcp_server,omitempty" yaml:"mcp_server"`
-	MCPPlugins      []string                `json:"mcp_plugins,omitempty" yaml:"mcp_plugins"`
+	// MCPServer names an operator-configured MCP server (from mcp.servers in alcove.yaml)
+	// to attach to this agent's session.
+	// TODO(Issue B): dispatcher wires MCPServer → MCP_SERVER_URL env var.
+	MCPServer  string   `json:"mcp_server,omitempty" yaml:"mcp_server"`
+	// MCPPlugins lists the plugins to expose from the MCP server; only valid when MCPServer is set.
+	MCPPlugins []string `json:"mcp_plugins,omitempty" yaml:"mcp_plugins"`
 
 	// Metadata (not from YAML).
 	TeamID       string     `json:"team_id,omitempty"`
@@ -153,9 +157,9 @@ func ParseAgentDefinition(data []byte) (*AgentDefinition, error) {
 		return nil, fmt.Errorf("cannot specify both 'repos' and 'repo_group'")
 	}
 
-	// Validate MCP: mcp_plugins requires mcp_server to be set.
+	// Validate MCP fields: mcp_plugins requires mcp_server.
 	if len(td.MCPPlugins) > 0 && td.MCPServer == "" {
-		return nil, fmt.Errorf("mcp_plugins requires mcp_server to be set")
+		return nil, fmt.Errorf("'mcp_plugins' requires 'mcp_server' to be set")
 	}
 
 	// Validate repos: each must have a non-empty URL, derive Name from URL if not provided, check for duplicates.
