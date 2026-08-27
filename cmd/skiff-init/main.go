@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"net/url"
 
 	"github.com/alcove-ai/alcove/internal"
 	"github.com/alcove-ai/alcove/internal/hail"
@@ -1122,28 +1123,30 @@ func configureClaude(mcpConfigJSON string) {
 // validateMCPServerURL checks that a MCP_SERVER_URL value is safe to use.
 // Only http:// or https:// URLs targeting localhost are accepted.
 // This prevents MCP connections from bypassing Gate's network isolation boundary.
+// url.Parse() is used instead of ad-hoc string manipulation to prevent
+// userinfo-injection attacks (e.g. http://localhost:3000@evil.com/mcp parses
+// to host "evil.com" and would route traffic outside Gate).
 func validateMCPServerURL(rawURL string) error {
 	if rawURL == "" {
 		return fmt.Errorf("empty URL")
 	}
-	lower := strings.ToLower(rawURL)
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
 	// Require http or https scheme.
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("URL must use http:// or https:// scheme, got %q", rawURL)
 	}
-	// Strip scheme for host extraction.
-	rest := rawURL[strings.Index(rawURL, "://")+3:]
-	// Extract host (everything before the first / or end of string).
-	host := rest
-	if idx := strings.IndexByte(rest, '/'); idx != -1 {
-		host = rest[:idx]
-	}
-	// Strip port if present.
-	if idx := strings.LastIndexByte(host, ':'); idx != -1 {
-		host = host[:idx]
+	// Reject userinfo (e.g. http://user:pass@host/path or http://localhost:3000@evil.com/mcp).
+	// Such URLs parse to an unexpected host after the @ sign.
+	if parsed.User != nil {
+		return fmt.Errorf("MCP_SERVER_URL must not contain userinfo (got %q); userinfo causes host to be misidentified", rawURL)
 	}
 	// Only localhost is permitted.
-	if strings.ToLower(host) != "localhost" && host != "127.0.0.1" && host != "::1" {
+	host := strings.ToLower(parsed.Hostname())
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
 		return fmt.Errorf("MCP_SERVER_URL must target localhost (got host %q); non-localhost MCP servers bypass Gate network isolation", host)
 	}
 	return nil

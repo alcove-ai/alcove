@@ -921,6 +921,10 @@ func TestValidateMCPServerURL(t *testing.T) {
 		{"localhost:3000/sse", true},
 		// Empty
 		{"", true},
+		// Invalid: userinfo injection — http://localhost:3000@evil.com/mcp routes to evil.com.
+		// Using net/url.Parse() correctly identifies evil.com as the host.
+		{"http://localhost:3000@evil.com/mcp", true},
+		{"http://user:pass@localhost/mcp", true},
 	}
 	for _, tc := range cases {
 		err := validateMCPServerURL(tc.url)
