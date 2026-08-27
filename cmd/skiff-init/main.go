@@ -1043,14 +1043,38 @@ func configureClaude(mcpConfigJSON string) {
 		"hasCompletedOnboarding": true,
 	}
 
-	// Add MCP servers if configured
+	// Collect all MCP servers, starting with ALCOVE_MCP_CONFIG entries.
+	mcpServers := make(map[string]any)
+
 	if mcpConfigJSON != "" {
-		var mcpServers map[string]any
-		if err := json.Unmarshal([]byte(mcpConfigJSON), &mcpServers); err != nil {
+		var configEntries map[string]any
+		if err := json.Unmarshal([]byte(mcpConfigJSON), &configEntries); err != nil {
 			log.Printf("warning: invalid ALCOVE_MCP_CONFIG: %v", err)
 		} else {
-			claudeConfig["mcpServers"] = mcpServers
+			for k, v := range configEntries {
+				mcpServers[k] = v
+			}
 		}
+	}
+
+	// Add MCP_SERVER_URL as an SSE transport entry.
+	if mcpServerURL := os.Getenv("MCP_SERVER_URL"); mcpServerURL != "" {
+		serverName := os.Getenv("MCP_SERVER_NAME")
+		if serverName == "" {
+			serverName = "mcp-server"
+		}
+		mcpServers[serverName] = map[string]any{
+			"url": mcpServerURL,
+		}
+	}
+
+	// Log MCP_TOOL_FILTER if set (enforcement deferred to runtime).
+	if mcpToolFilter := os.Getenv("MCP_TOOL_FILTER"); mcpToolFilter != "" {
+		log.Printf("MCP_TOOL_FILTER set: %s (filtering deferred to runtime)", mcpToolFilter)
+	}
+
+	if len(mcpServers) > 0 {
+		claudeConfig["mcpServers"] = mcpServers
 	}
 
 	// Determine home directory

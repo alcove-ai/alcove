@@ -501,6 +501,8 @@ func TestGetAgentDefinitionFieldCopyRoundTrip(t *testing.T) {
 			Image:         "quay.io/myorg/devenv:latest",
 			NetworkAccess: "external",
 		},
+		MCPServer:  "my-mcp-server",
+		MCPPlugins: []string{"plugin-a", "plugin-b"},
 	}
 
 	// Step 2: Marshal to JSON (simulates UpsertAgentDefinition storing parsed JSONB).
@@ -545,6 +547,8 @@ func TestGetAgentDefinitionFieldCopyRoundTrip(t *testing.T) {
 	td.EnforcementMode = parsed.EnforcementMode
 	td.CIGate = parsed.CIGate
 	td.DevContainer = parsed.DevContainer
+	td.MCPServer = parsed.MCPServer
+	td.MCPPlugins = parsed.MCPPlugins
 
 	// Step 5: Use reflect to verify every yaml-tagged field matches the
 	// original. Fields with a yaml tag are "parseable" (come from the YAML
@@ -573,7 +577,7 @@ func TestGetAgentDefinitionFieldCopyRoundTrip(t *testing.T) {
 
 	// Sanity check: make sure we actually checked a meaningful number of fields.
 	// Update this count when adding new yaml-tagged fields to AgentDefinition.
-	const expectedYAMLFields = 22
+	const expectedYAMLFields = 24
 	if yamlFieldCount != expectedYAMLFields {
 		t.Errorf("expected %d yaml-tagged fields in AgentDefinition, found %d; "+
 			"update this test and the copy block in GetAgentDefinition",
@@ -733,5 +737,64 @@ repos:
 	}
 	if !strings.Contains(fullErr.Error(), "prompt") {
 		t.Errorf("expected error to mention missing prompt field, got: %v", fullErr)
+	}
+}
+
+func TestParseAgentDefinitionWithMCPServer(t *testing.T) {
+	yamlData := `
+name: MCP Agent
+prompt: "Do something with MCP"
+mcp_server: my-mcp-server
+mcp_plugins:
+  - plugin-a
+  - plugin-b
+`
+	td, err := ParseAgentDefinition([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if td.MCPServer != "my-mcp-server" {
+		t.Errorf("MCPServer: got %q, want %q", td.MCPServer, "my-mcp-server")
+	}
+	if len(td.MCPPlugins) != 2 {
+		t.Fatalf("expected 2 MCPPlugins, got %d", len(td.MCPPlugins))
+	}
+	if td.MCPPlugins[0] != "plugin-a" {
+		t.Errorf("MCPPlugins[0]: got %q, want %q", td.MCPPlugins[0], "plugin-a")
+	}
+	if td.MCPPlugins[1] != "plugin-b" {
+		t.Errorf("MCPPlugins[1]: got %q, want %q", td.MCPPlugins[1], "plugin-b")
+	}
+}
+
+func TestParseAgentDefinitionMCPPluginsWithoutServer(t *testing.T) {
+	yamlData := `
+name: Bad MCP Agent
+prompt: "Do something"
+mcp_plugins:
+  - plugin-a
+`
+	_, err := ParseAgentDefinition([]byte(yamlData))
+	if err == nil {
+		t.Fatal("expected error for mcp_plugins without mcp_server")
+	}
+	if !strings.Contains(err.Error(), "mcp_plugins requires mcp_server") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestToTaskRequestIncludesMCPServer(t *testing.T) {
+	td := &AgentDefinition{
+		Name:       "mcp-agent",
+		Prompt:     "Do something",
+		MCPServer:  "my-server",
+		MCPPlugins: []string{"plugin-x"},
+	}
+	req := td.ToTaskRequest()
+	if req.MCPServer != "my-server" {
+		t.Errorf("MCPServer: got %q, want %q", req.MCPServer, "my-server")
+	}
+	if len(req.MCPPlugins) != 1 || req.MCPPlugins[0] != "plugin-x" {
+		t.Errorf("MCPPlugins: got %v, want [plugin-x]", req.MCPPlugins)
 	}
 }

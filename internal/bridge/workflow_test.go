@@ -1468,3 +1468,94 @@ workflow:
 		t.Errorf("Expected max_retries to be 3 but got %d", verifyStep.MaxRetries)
 	}
 }
+
+func TestParseWorkflowDefinitionWithMCPFields(t *testing.T) {
+	yamlData := `
+name: MCP Workflow
+workflow:
+  - id: analyze
+    agent: mcp-agent
+    mcp_tools:
+      - browser.*
+      - search_web
+    mcp_failure: continue
+`
+	wd, err := ParseWorkflowDefinition([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := wd.Workflow[0]
+	if len(step.MCPTools) != 2 {
+		t.Fatalf("expected 2 MCPTools, got %d", len(step.MCPTools))
+	}
+	if step.MCPTools[0] != "browser.*" {
+		t.Errorf("MCPTools[0]: got %q, want %q", step.MCPTools[0], "browser.*")
+	}
+	if step.MCPTools[1] != "search_web" {
+		t.Errorf("MCPTools[1]: got %q, want %q", step.MCPTools[1], "search_web")
+	}
+	if step.MCPFailure != "continue" {
+		t.Errorf("MCPFailure: got %q, want %q", step.MCPFailure, "continue")
+	}
+}
+
+func TestMCPFailureValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		wantError bool
+	}{
+		{"empty (valid)", "", false},
+		{"fail (valid)", "fail", false},
+		{"continue (valid)", "continue", false},
+		{"invalid value", "ignore", true},
+		{"invalid uppercase", "FAIL", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			yamlData := `
+name: Test Workflow
+workflow:
+  - id: step1
+    agent: test-agent
+    mcp_failure: ` + tc.value + `
+`
+			_, err := ParseWorkflowDefinition([]byte(yamlData))
+			if tc.wantError && err == nil {
+				t.Errorf("expected error for mcp_failure=%q but got none", tc.value)
+			}
+			if !tc.wantError && err != nil {
+				t.Errorf("unexpected error for mcp_failure=%q: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+func TestMatchMCPTool(t *testing.T) {
+	tests := []struct {
+		name     string
+		pattern  string
+		toolName string
+		want     bool
+	}{
+		{"exact match", "search_web", "search_web", true},
+		{"exact no match", "search_web", "browser_navigate", false},
+		{"wildcard prefix match", "browser.*", "browser.navigate", true},
+		{"wildcard prefix match 2", "browser.*", "browser.screenshot", true},
+		{"wildcard no match different prefix", "browser.*", "search_web", false},
+		{"wildcard no match partial prefix", "brows.*", "browser.navigate", false},
+		{"empty pattern no match", "", "search_web", false},
+		{"empty tool no match", "browser.*", "", false},
+		{"wildcard matches dot prefix only", "browser.*", "browserNavigate", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MatchMCPTool(tc.pattern, tc.toolName)
+			if got != tc.want {
+				t.Errorf("MatchMCPTool(%q, %q) = %v, want %v", tc.pattern, tc.toolName, got, tc.want)
+			}
+		})
+	}
+}

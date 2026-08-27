@@ -26,6 +26,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// MCPPluginConfig holds allowed-tool configuration for an MCP plugin.
+type MCPPluginConfig struct {
+	Tools []string `yaml:"tools"`
+}
+
+// MCPResourceLimits holds Kubernetes resource limit/request values for an MCP server container.
+type MCPResourceLimits struct {
+	CPURequest    string `yaml:"cpu_request"`
+	MemoryRequest string `yaml:"memory_request"`
+	CPULimit      string `yaml:"cpu_limit"`
+	MemoryLimit   string `yaml:"memory_limit"`
+}
+
+// MCPServerConfig holds operator-level configuration for a single MCP server.
+type MCPServerConfig struct {
+	Image           string                     `yaml:"image"`
+	AllowedVersions []string                   `yaml:"allowed_versions"`
+	AllowedPlugins  map[string]MCPPluginConfig  `yaml:"allowed_plugins"`
+	ResourceLimits  MCPResourceLimits          `yaml:"resource_limits"`
+	Env             map[string]string          `yaml:"env"`
+}
+
 // Config holds all Bridge configuration.
 type Config struct {
 	HailURL       string
@@ -49,6 +71,9 @@ type Config struct {
 	// OpenShiftOAuthAdmins is a list of usernames to bootstrap as admins
 	// when using the openshift-oauth auth backend.
 	OpenShiftOAuthAdmins []string
+
+	// MCPServers holds the operator-configured MCP server definitions.
+	MCPServers map[string]MCPServerConfig
 }
 
 // SystemLLMConfig holds configuration for the Bridge system LLM.
@@ -214,6 +239,9 @@ type configFile struct {
 	RHIdentityAdmins      []string `yaml:"rh_identity_admins"`
 	OpenShiftOAuthAdmins  []string `yaml:"openshift_oauth_admins"`
 	SystemLLM             *SystemLLMConfig `yaml:"system_llm"`
+	MCP                   struct {
+		Servers map[string]MCPServerConfig `yaml:"servers"`
+	} `yaml:"mcp"`
 }
 
 // parseConfigFile reads and parses a YAML config file.
@@ -254,6 +282,9 @@ func (c *Config) parseConfigFile(path string) error {
 	}
 	if cf.SystemLLM != nil {
 		c.SystemLLM = *cf.SystemLLM
+	}
+	if len(cf.MCP.Servers) > 0 {
+		c.MCPServers = cf.MCP.Servers
 	}
 	return nil
 }

@@ -62,6 +62,8 @@ type WorkflowStep struct {
 	Credentials    map[string]string      `json:"credentials,omitempty" yaml:"credentials,omitempty"`
 	DirectOutbound bool                   `json:"direct_outbound,omitempty" yaml:"direct_outbound,omitempty"`
 	OutputContract *OutputContract        `json:"output_contract,omitempty" yaml:"output_contract,omitempty"`
+	MCPTools       []string               `json:"mcp_tools,omitempty" yaml:"mcp_tools,omitempty"`
+	MCPFailure     string                 `json:"mcp_failure,omitempty" yaml:"mcp_failure,omitempty"`
 }
 
 // WorkflowTrigger defines when a workflow should be triggered.
@@ -233,6 +235,11 @@ func validateWorkflowSteps(steps []WorkflowStep) error {
 		// Validate max_iterations
 		if step.MaxIterations < 0 {
 			return fmt.Errorf("workflow step '%s' has invalid max_iterations: must be positive", step.ID)
+		}
+
+		// Validate mcp_failure enum value.
+		if step.MCPFailure != "" && step.MCPFailure != "fail" && step.MCPFailure != "continue" {
+			return fmt.Errorf("workflow step '%s' has invalid mcp_failure %q (must be \"fail\" or \"continue\")", step.ID, step.MCPFailure)
 		}
 
 		// Backward compat: if Needs is populated and Depends is empty, auto-generate Depends.
@@ -970,4 +977,16 @@ func validateOutputContract(contract *OutputContract) error {
 	}
 
 	return nil
+}
+
+// MatchMCPTool reports whether toolName matches the given pattern.
+// Pattern may be an exact tool name (e.g. "browser_navigate") or a
+// prefix wildcard of the form "prefix.*" (e.g. "browser.*"), which
+// matches any tool whose name starts with "prefix.".
+func MatchMCPTool(pattern, toolName string) bool {
+	if strings.HasSuffix(pattern, ".*") {
+		prefix := pattern[:len(pattern)-2]
+		return strings.HasPrefix(toolName, prefix+".")
+	}
+	return pattern == toolName
 }
