@@ -899,3 +899,86 @@ func TestConfigureClaude_MergeWithALCOVE_MCP_CONFIG(t *testing.T) {
 		t.Error("dynamic-server from MCP_SERVER_URL should be added")
 	}
 }
+
+// TestValidateMCPServerURL verifies URL validation for MCP_SERVER_URL.
+func TestValidateMCPServerURL(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantErr bool
+	}{
+		// Valid localhost URLs
+		{"http://localhost:3000/sse", false},
+		{"https://localhost:8443/mcp", false},
+		{"http://localhost/", false},
+		{"http://127.0.0.1:3000/sse", false},
+		// Invalid: non-localhost hosts
+		{"http://example.com/mcp", true},
+		{"http://internal-mcp-server/sse", true},
+		{"http://10.0.0.1:3000/mcp", true},
+		// Invalid: missing/wrong scheme
+		{"ftp://localhost/sse", true},
+		{"ws://localhost:3000/sse", true},
+		{"localhost:3000/sse", true},
+		// Empty
+		{"", true},
+	}
+	for _, tc := range cases {
+		err := validateMCPServerURL(tc.url)
+		if tc.wantErr && err == nil {
+			t.Errorf("validateMCPServerURL(%q): expected error, got nil", tc.url)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("validateMCPServerURL(%q): unexpected error: %v", tc.url, err)
+		}
+	}
+}
+
+// TestConfigureClaude_InvalidMCPServerURL verifies that a non-localhost URL is rejected
+// and not written to ~/.claude.json.
+func TestConfigureClaude_InvalidMCPServerURL(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("MCP_SERVER_URL", "http://remote-mcp.example.com/sse")
+	t.Setenv("MCP_SERVER_NAME", "bad-server")
+
+	configureClaude("")
+
+	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("reading .claude.json: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("parsing .claude.json: %v", err)
+	}
+	if _, ok := result["mcpServers"]; ok {
+		t.Errorf("expected no mcpServers for invalid (non-localhost) MCP_SERVER_URL")
+	}
+}
+
+// TestConfigureClaude_MCPToolFilterNotLogged verifies that MCP_TOOL_FILTER is not read
+// or logged (it is a data-model placeholder; enforcement is deferred to Issue B/Gate).
+// This test simply verifies the function completes without error when MCP_TOOL_FILTER is
+// set — the value should be silently ignored.
+func TestConfigureClaude_MCPToolFilterIgnored(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("MCP_SERVER_URL", "")
+	t.Setenv("MCP_TOOL_FILTER", "browser.*,search.*")
+
+	// Should not panic or fail
+	configureClaude("")
+
+	data, err := os.ReadFile(filepath.Join(homeDir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("reading .claude.json: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("parsing .claude.json: %v", err)
+	}
+	// onboarding flag should always be set
+	if v, _ := result["hasCompletedOnboarding"].(bool); !v {
+		t.Error("hasCompletedOnboarding should be true")
+	}
+}

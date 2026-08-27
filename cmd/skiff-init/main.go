@@ -1037,6 +1037,14 @@ func setupEnv(task internal.Task) {
 // hasCompletedOnboarding prevents Claude Code from validating the API key at startup
 // via a direct CONNECT tunnel to api.anthropic.com, which bypasses Gate's credential
 // injection.
+//
+// MCP_SERVER_URL env var — if set, it must be a localhost URL (http://localhost:PORT/...
+// or https://localhost:PORT/...) identifying an SSE-transport MCP server sidecar.
+// Non-localhost URLs are rejected to prevent routing Claude Code MCP connections outside
+// Gate's network isolation boundary.
+//
+// MCP_TOOL_FILTER is intentionally NOT read here; tool-level filtering enforcement is
+// a runtime concern deferred to Issue B and will be implemented in Gate/dispatcher.
 func configureClaude(mcpConfigJSON string) {
 	// Build the Claude Code config structure
 	claudeConfig := map[string]any{
@@ -1058,19 +1066,22 @@ func configureClaude(mcpConfigJSON string) {
 	}
 
 	// Add MCP_SERVER_URL as an SSE transport entry.
+	// Security: only localhost URLs are permitted — MCP server sidecars run on the same
+	// host as Skiff (shared network namespace). Non-localhost URLs would route MCP traffic
+	// outside Gate, defeating network isolation.
 	if mcpServerURL := os.Getenv("MCP_SERVER_URL"); mcpServerURL != "" {
-		serverName := os.Getenv("MCP_SERVER_NAME")
-		if serverName == "" {
-			serverName = "mcp-server"
+		if err := validateMCPServerURL(mcpServerURL); err != nil {
+			log.Printf("warning: MCP_SERVER_URL rejected: %v", err)
+		} else {
+			serverName := os.Getenv("MCP_SERVER_NAME")
+			if serverName == "" {
+				serverName = "mcp-server"
+			}
+			mcpServers[serverName] = map[string]any{
+				"url": mcpServerURL,
+			}
+			log.Printf("configured MCP SSE server %q at %s", serverName, mcpServerURL)
 		}
-		mcpServers[serverName] = map[string]any{
-			"url": mcpServerURL,
-		}
-	}
-
-	// Log MCP_TOOL_FILTER if set (enforcement deferred to runtime).
-	if mcpToolFilter := os.Getenv("MCP_TOOL_FILTER"); mcpToolFilter != "" {
-		log.Printf("MCP_TOOL_FILTER set: %s (filtering deferred to runtime)", mcpToolFilter)
 	}
 
 	if len(mcpServers) > 0 {
@@ -1106,6 +1117,36 @@ func configureClaude(mcpConfigJSON string) {
 	}
 	settingsData, _ := json.MarshalIndent(settings, "", "  ")
 	os.WriteFile(settingsPath, settingsData, 0644)
+}
+
+// validateMCPServerURL checks that a MCP_SERVER_URL value is safe to use.
+// Only http:// or https:// URLs targeting localhost are accepted.
+// This prevents MCP connections from bypassing Gate's network isolation boundary.
+func validateMCPServerURL(rawURL string) error {
+	if rawURL == "" {
+		return fmt.Errorf("empty URL")
+	}
+	lower := strings.ToLower(rawURL)
+	// Require http or https scheme.
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return fmt.Errorf("URL must use http:// or https:// scheme, got %q", rawURL)
+	}
+	// Strip scheme for host extraction.
+	rest := rawURL[strings.Index(rawURL, "://")+3:]
+	// Extract host (everything before the first / or end of string).
+	host := rest
+	if idx := strings.IndexByte(rest, '/'); idx != -1 {
+		host = rest[:idx]
+	}
+	// Strip port if present.
+	if idx := strings.LastIndexByte(host, ':'); idx != -1 {
+		host = host[:idx]
+	}
+	// Only localhost is permitted.
+	if strings.ToLower(host) != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return fmt.Errorf("MCP_SERVER_URL must target localhost (got host %q); non-localhost MCP servers bypass Gate network isolation", host)
+	}
+	return nil
 }
 
 // skillRepo represents a skill/agent repository to clone and load as a plugin.
