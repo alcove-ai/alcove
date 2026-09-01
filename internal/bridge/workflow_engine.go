@@ -395,6 +395,15 @@ func (we *WorkflowEngine) dispatchStep(ctx context.Context, run *WorkflowRun, st
 		taskReq.DirectOutbound = true
 	}
 
+	// Propagate MCP step-level fields to the task request.
+	// The dispatcher uses these to build MCP_TOOL_FILTER and set MCPFailureMode.
+	if len(step.MCPTools) > 0 {
+		taskReq.MCPTools = step.MCPTools
+	}
+	if step.MCPFailure != "" {
+		taskReq.MCPFailure = step.MCPFailure
+	}
+
 	// If step has repos specified, override the agent's repos
 	if len(step.Repos) > 0 {
 		taskReq.Repos = step.Repos

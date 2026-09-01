@@ -263,9 +263,90 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 	// Dev container support: when a dev container image is specified, override
 	// DEV_CONTAINER_HOST to localhost (containers in a K8s Pod share network
 	// namespace) and add init containers, sidecar, and shared volumes.
+	var mcpInitContainer *corev1.Container
 	var devInitContainers []corev1.Container
 	var devVolumes []corev1.Volume
 	var skiffExtraVolumeMounts []corev1.VolumeMount
+
+	// MCP server sidecar support: when MCPServerImage is set, add an MCP server
+	// as a native sidecar init container between Gate and dev/Skiff.
+	// On Kubernetes, all containers in a Pod share the same network namespace —
+	// MCP is reachable at localhost:3000. Note: unlike Podman (where MCP is
+	// isolated to the internal network), on K8s MCP has the same network access
+	// as Gate (including external). This is a K8s architectural constraint.
+	if spec.MCPServerImage != "" {
+		mcpEnvVars := envMapToVars(spec.MCPServerEnv)
+
+		// Parse resource limits — use resource.ParseQuantity (not MustParse) so
+		// that bad operator-provided strings in MCPResourceLimits return an error
+		// instead of panicking on Bridge startup.
+		cpuReq := "100m"
+		memReq := "256Mi"
+		cpuLim := "2"
+		memLim := "4Gi"
+		if spec.MCPResourceLimits.CPURequest != "" {
+			cpuReq = spec.MCPResourceLimits.CPURequest
+		}
+		if spec.MCPResourceLimits.MemoryRequest != "" {
+			memReq = spec.MCPResourceLimits.MemoryRequest
+		}
+		if spec.MCPResourceLimits.CPULimit != "" {
+			cpuLim = spec.MCPResourceLimits.CPULimit
+		}
+		if spec.MCPResourceLimits.MemoryLimit != "" {
+			memLim = spec.MCPResourceLimits.MemoryLimit
+		}
+
+		cpuReqQ, err := resource.ParseQuantity(cpuReq)
+		if err != nil {
+			return TaskHandle{}, fmt.Errorf("invalid MCP CPU request %q: %w", cpuReq, err)
+		}
+		memReqQ, err := resource.ParseQuantity(memReq)
+		if err != nil {
+			return TaskHandle{}, fmt.Errorf("invalid MCP memory request %q: %w", memReq, err)
+		}
+		cpuLimQ, err := resource.ParseQuantity(cpuLim)
+		if err != nil {
+			return TaskHandle{}, fmt.Errorf("invalid MCP CPU limit %q: %w", cpuLim, err)
+		}
+		memLimQ, err := resource.ParseQuantity(memLim)
+		if err != nil {
+			return TaskHandle{}, fmt.Errorf("invalid MCP memory limit %q: %w", memLim, err)
+		}
+
+		mcpSidecar := corev1.Container{
+			Name:            "mcp",
+			Image:           spec.MCPServerImage,
+			Env:             mcpEnvVars,
+			RestartPolicy:   &sidecarRestart,
+			SecurityContext: securityContext,
+			Ports: []corev1.ContainerPort{
+				{ContainerPort: 3000, Protocol: corev1.ProtocolTCP},
+			},
+			// TCP readiness probe: poll port 3000 every 2s for up to 30s (15 failures × 2s period).
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstr.FromInt32(3000),
+					},
+				},
+				InitialDelaySeconds: 2,
+				PeriodSeconds:       2,
+				FailureThreshold:    15,
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    cpuReqQ,
+					corev1.ResourceMemory: memReqQ,
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    cpuLimQ,
+					corev1.ResourceMemory: memLimQ,
+				},
+			},
+		}
+		mcpInitContainer = &mcpSidecar
+	}
 
 	if spec.DevContainerImage != "" {
 		// In K8s, all containers in a Pod share localhost — override the
@@ -338,15 +419,16 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 		VolumeMounts: skiffExtraVolumeMounts,
 	}
 
-	// Build the init container list: Gate sidecar, then dev sidecar (if present).
-	// Order: Gate (native sidecar) → dev (native sidecar)
+	// Build the init container list: Gate sidecar → MCP sidecar (if present) → dev sidecar (if present).
+	// K8s runs init containers in declaration order, so Gate starts first (serving port 8443),
+	// then MCP (ready on port 3000), then dev. Skiff (main container) starts after all sidecars are ready.
 	var initContainers []corev1.Container
+	initContainers = append(initContainers, gateContainer) // Gate always first
+	if mcpInitContainer != nil {
+		initContainers = append(initContainers, *mcpInitContainer) // MCP after Gate
+	}
 	if len(devInitContainers) > 0 {
-		// Gate first, then dev sidecar.
-		initContainers = append(initContainers, gateContainer)          // Gate sidecar
-		initContainers = append(initContainers, devInitContainers[0])   // dev sidecar
-	} else {
-		initContainers = []corev1.Container{gateContainer}
+		initContainers = append(initContainers, devInitContainers[0]) // dev last
 	}
 
 	// Build the Job spec.

@@ -120,9 +120,16 @@ type TaskRequest struct {
 	EnforcementMode string                  `json:"-"` // "enforce" (default) or "monitor"
 	DevContainer    *DevContainerSpec       `json:"dev_container,omitempty"`
 	// MCPServer and MCPPlugins are set internally from the agent definition.
-	// TODO(Issue B): dispatcher translates MCPServer → MCP_SERVER_URL env var via MCPServers config lookup.
+	// The dispatcher translates MCPServer → MCP_SERVER_URL env var via MCPServers config lookup.
 	MCPServer  string   `json:"-"` // Operator-configured MCP server name
 	MCPPlugins []string `json:"-"` // Plugin names to expose from the MCP server
+	// MCPTools restricts which MCP tools Skiff may invoke (exact name or "prefix.*" glob).
+	// Set from WorkflowStep.MCPTools by the workflow engine. Empty means no restriction.
+	MCPTools []string `json:"-"`
+	// MCPFailure controls Skiff's behavior when the MCP server is unavailable.
+	// "" or "fail" = abort; "continue" = start without MCP.
+	// Set from WorkflowStep.MCPFailure by the workflow engine.
+	MCPFailure string `json:"-"`
 	// Task metadata — set by dispatch code paths, stored in sessions table.
 	TaskName          string `json:"-"` // Schedule/agent definition name
 	TriggerType       string `json:"-"` // "event", "cron", "manual", "webhook"
@@ -146,6 +153,94 @@ type StatusUpdate struct {
 	FinishedAt *time.Time          `json:"finished_at,omitempty"`
 	Artifacts  []internal.Artifact `json:"artifacts,omitempty"`
 	Outputs    map[string]string   `json:"outputs,omitempty"` // Agent-produced outputs from /tmp/alcove-outputs.json
+}
+
+// validateMCPRequest validates the MCP server and plugin selections against operator config.
+// Returns the matching MCPServerConfig on success, or an error with a clear message.
+func validateMCPRequest(server string, plugins []string, servers map[string]MCPServerConfig) (*MCPServerConfig, error) {
+	if server == "" {
+		return nil, nil // No MCP session — valid.
+	}
+
+	cfg, ok := servers[server]
+	if !ok {
+		available := make([]string, 0, len(servers))
+		for k := range servers {
+			available = append(available, k)
+		}
+		return nil, fmt.Errorf("MCP server %q is not configured — available servers: %v", server, available)
+	}
+
+	if cfg.Image == "" {
+		return nil, fmt.Errorf("MCP server %q has no image configured", server)
+	}
+
+	for _, plugin := range plugins {
+		if _, ok := cfg.AllowedPlugins[plugin]; !ok {
+			allowed := make([]string, 0, len(cfg.AllowedPlugins))
+			for k := range cfg.AllowedPlugins {
+				allowed = append(allowed, k)
+			}
+			return nil, fmt.Errorf("MCP plugin %q is not allowed on server %q — allowed: %v", plugin, server, allowed)
+		}
+	}
+
+	return &cfg, nil
+}
+
+// buildMCPToolFilter collects all tools from the requested plugins and optionally
+// intersects them with the step-level MCPTools patterns (using MatchMCPTool).
+// Returns a JSON-encoded array of tool names, or an empty string if no tools remain.
+func buildMCPToolFilter(plugins []string, allowedPlugins map[string]MCPPluginConfig, stepTools []string) (string, error) {
+	// Collect all tools from the requested plugins.
+	var allTools []string
+	for _, plugin := range plugins {
+		if pc, ok := allowedPlugins[plugin]; ok {
+			allTools = append(allTools, pc.Tools...)
+		}
+	}
+
+	// If no step-level filter, expose all tools from the requested plugins.
+	if len(stepTools) == 0 {
+		if len(allTools) == 0 {
+			return "", nil
+		}
+		b, err := json.Marshal(allTools)
+		if err != nil {
+			return "", fmt.Errorf("marshaling MCP tool filter: %w", err)
+		}
+		return string(b), nil
+	}
+
+	// Intersect allTools with stepTools patterns.
+	var filtered []string
+	for _, tool := range allTools {
+		for _, pattern := range stepTools {
+			if MatchMCPTool(pattern, tool) {
+				filtered = append(filtered, tool)
+				break
+			}
+		}
+	}
+
+	if len(filtered) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(filtered)
+	if err != nil {
+		return "", fmt.Errorf("marshaling MCP tool filter: %w", err)
+	}
+	return string(b), nil
+}
+
+// buildMCPServerURL returns the MCP server URL for Skiff based on the runtime type.
+// On Kubernetes, all containers share localhost. On Podman, the MCP container is
+// reachable by its container name on the internal network.
+func buildMCPServerURL(runtimeType, taskID string) string {
+	if runtimeType == "kubernetes" {
+		return "http://localhost:3000"
+	}
+	return "http://" + runtime.MCPContainerName(taskID) + ":3000"
 }
 
 // DispatchTask creates a session record, publishes to Hail, and starts a
@@ -808,6 +903,64 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 		skiffEnv["DEV_CONTAINER_HOST"] = devHost
 	}
 
+	// Wire MCP server sidecar when req.MCPServer is set.
+	// All validation and env var injection is done here, gated on req.MCPServer != "".
+	// Non-MCP sessions are completely unaffected.
+	if req.MCPServer != "" {
+		serverCfg, err := validateMCPRequest(req.MCPServer, req.MCPPlugins, d.cfg.MCPServers)
+		if err != nil {
+			d.updateSessionStatus(ctx, sessionID, "error", nil, nil)
+			return nil, fmt.Errorf("MCP configuration error: %w", err)
+		}
+
+		// Set TaskSpec fields — image always comes from operator config, never from agent YAML.
+		spec.MCPServerImage = serverCfg.Image
+		spec.MCPServerName = req.MCPServer
+		spec.MCPFailureMode = req.MCPFailure
+
+		// Build MCP server env from operator config.
+		if len(serverCfg.Env) > 0 {
+			spec.MCPServerEnv = make(map[string]string, len(serverCfg.Env))
+			for k, v := range serverCfg.Env {
+				spec.MCPServerEnv[k] = v
+			}
+		}
+
+		// Apply operator-defined resource limits.
+		spec.MCPResourceLimits = runtime.MCPResourceLimits{
+			CPURequest:    serverCfg.ResourceLimits.CPURequest,
+			MemoryRequest: serverCfg.ResourceLimits.MemoryRequest,
+			CPULimit:      serverCfg.ResourceLimits.CPULimit,
+			MemoryLimit:   serverCfg.ResourceLimits.MemoryLimit,
+		}
+
+		// Build MCP_SERVER_URL: localhost on K8s (shared pod network), container
+		// name on Podman (internal network DNS).
+		mcpServerURL := buildMCPServerURL(d.cfg.RuntimeType, taskID)
+		skiffEnv["MCP_SERVER_URL"] = mcpServerURL
+		skiffEnv["MCP_SERVER_NAME"] = req.MCPServer
+
+		// Build MCP_TOOL_FILTER: intersection of plugin tools with step-level MCPTools.
+		// Note: enforcement at Claude Code level is Issue C — this value is built
+		// correctly for observability and future enforcement.
+		toolFilter, err := buildMCPToolFilter(req.MCPPlugins, serverCfg.AllowedPlugins, req.MCPTools)
+		if err != nil {
+			log.Printf("warning: building MCP tool filter: %v", err)
+		} else if toolFilter != "" {
+			skiffEnv["MCP_TOOL_FILTER"] = toolFilter
+		}
+
+		// Record MCP configuration in session observability data.
+		runtimeConfig["mcp_server"] = req.MCPServer
+		if len(req.MCPPlugins) > 0 {
+			runtimeConfig["mcp_plugins"] = req.MCPPlugins
+		}
+
+		// Re-marshal runtime config to include MCP fields.
+		runtimeConfigJSON, _ = json.Marshal(runtimeConfig)
+		_, _ = d.db.Exec(ctx, `UPDATE sessions SET runtime_config = $1 WHERE id = $2`, runtimeConfigJSON, sessionID)
+	}
+
 	handle, err := d.rt.RunTask(ctx, spec)
 	if err != nil {
 		// Update session to error state and store the startup error detail.
@@ -919,7 +1072,12 @@ func (d *Dispatcher) ListenForStatusUpdates(ctx context.Context) error {
 					if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
 						log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
 					}
-					// Clean up dev container and workspace volume (no-op if not present).
+					// Clean up MCP server sidecar (no-op if not present).
+						mcpName := runtime.MCPContainerName(taskID)
+						if err := d.rt.StopService(cleanupCtx, mcpName); err != nil {
+							log.Printf("cleanup: failed to stop MCP container %s: %v (may not exist)", mcpName, err)
+						}
+						// Clean up dev container and workspace volume (no-op if not present).
 					devName := runtime.DevContainerName(taskID)
 					if err := d.rt.StopService(cleanupCtx, devName); err != nil {
 						log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
@@ -1083,7 +1241,12 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 				if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
 					log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
 				}
-				// Clean up dev container and workspace volume (no-op if not present).
+				// Clean up MCP server sidecar (no-op if not present).
+						mcpName := runtime.MCPContainerName(taskID)
+						if err := d.rt.StopService(cleanupCtx, mcpName); err != nil {
+							log.Printf("cleanup: failed to stop MCP container %s: %v (may not exist)", mcpName, err)
+						}
+						// Clean up dev container and workspace volume (no-op if not present).
 				devName := runtime.DevContainerName(taskID)
 				if err := d.rt.StopService(cleanupCtx, devName); err != nil {
 					log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
@@ -1145,7 +1308,12 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 				if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
 					log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
 				}
-				// Clean up dev container and workspace volume (no-op if not present).
+				// Clean up MCP server sidecar (no-op if not present).
+						mcpName := runtime.MCPContainerName(taskID)
+						if err := d.rt.StopService(cleanupCtx, mcpName); err != nil {
+							log.Printf("cleanup: failed to stop MCP container %s: %v (may not exist)", mcpName, err)
+						}
+						// Clean up dev container and workspace volume (no-op if not present).
 				devName := runtime.DevContainerName(taskID)
 				if err := d.rt.StopService(cleanupCtx, devName); err != nil {
 					log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
@@ -1191,7 +1359,12 @@ func (d *Dispatcher) RecoverHandles(ctx context.Context) {
 							if err := d.rt.StopService(cleanupCtx, gateName); err != nil {
 								log.Printf("cleanup: failed to stop gate %s: %v", gateName, err)
 							}
-							// Clean up dev container and workspace volume (no-op if not present).
+							// Clean up MCP server sidecar (no-op if not present).
+						mcpName := runtime.MCPContainerName(taskID)
+						if err := d.rt.StopService(cleanupCtx, mcpName); err != nil {
+							log.Printf("cleanup: failed to stop MCP container %s: %v (may not exist)", mcpName, err)
+						}
+						// Clean up dev container and workspace volume (no-op if not present).
 							devName := runtime.DevContainerName(taskID)
 							if err := d.rt.StopService(cleanupCtx, devName); err != nil {
 								log.Printf("cleanup: failed to stop dev container %s: %v (may not exist)", devName, err)
@@ -1263,6 +1436,14 @@ func (d *Dispatcher) ReconcileLoop(ctx context.Context) {
 				log.Printf("reconcile: error cleaning up orphaned dev containers: %v", devErr)
 			} else if devCleaned > 0 {
 				log.Printf("reconcile: cleaned up %d orphaned dev container(s)", devCleaned)
+			}
+
+			// Sweep orphaned MCP server containers.
+			mcpCleaned, mcpErr := d.rt.CleanupOrphanedContainers(ctx, "mcp-")
+			if mcpErr != nil {
+				log.Printf("reconcile: error cleaning up orphaned MCP containers: %v", mcpErr)
+			} else if mcpCleaned > 0 {
+				log.Printf("reconcile: cleaned up %d orphaned MCP container(s)", mcpCleaned)
 			}
 		}
 	}

@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeExecCommand returns a function that creates exec.Cmd pointing to the
@@ -239,10 +240,10 @@ func TestCancelTask_CommandConstruction(t *testing.T) {
 		t.Fatalf("CancelTask() error: %v", err)
 	}
 
-	// Should have 7 calls: stop skiff, rm skiff, stop gate, rm gate,
-	// stop dev, rm dev, volume rm.
-	if len(*calls) != 7 {
-		t.Fatalf("expected 7 podman calls, got %d", len(*calls))
+	// Should have 9 calls: stop skiff, rm skiff, stop gate, rm gate,
+	// stop mcp, rm mcp, stop dev, rm dev, volume rm.
+	if len(*calls) != 9 {
+		t.Fatalf("expected 9 podman calls, got %d", len(*calls))
 	}
 
 	// Verify stop calls include --time 10.
@@ -262,15 +263,23 @@ func TestCancelTask_CommandConstruction(t *testing.T) {
 	if !strings.Contains(rmGate, "rm -f gate-task-1") {
 		t.Errorf("expected rm gate call, got: %s", rmGate)
 	}
-	stopDev := strings.Join((*calls)[4], " ")
+	stopMCP := strings.Join((*calls)[4], " ")
+	if !strings.Contains(stopMCP, "stop --time 10 mcp-task-1") {
+		t.Errorf("expected stop mcp call, got: %s", stopMCP)
+	}
+	rmMCP := strings.Join((*calls)[5], " ")
+	if !strings.Contains(rmMCP, "rm -f mcp-task-1") {
+		t.Errorf("expected rm mcp call, got: %s", rmMCP)
+	}
+	stopDev := strings.Join((*calls)[6], " ")
 	if !strings.Contains(stopDev, "stop --time 10 dev-task-1") {
 		t.Errorf("expected stop dev call, got: %s", stopDev)
 	}
-	rmDev := strings.Join((*calls)[5], " ")
+	rmDev := strings.Join((*calls)[7], " ")
 	if !strings.Contains(rmDev, "rm -f dev-task-1") {
 		t.Errorf("expected rm dev call, got: %s", rmDev)
 	}
-	volRm := strings.Join((*calls)[6], " ")
+	volRm := strings.Join((*calls)[8], " ")
 	if !strings.Contains(volRm, "volume rm workspace-task-1") {
 		t.Errorf("expected volume rm call, got: %s", volRm)
 	}
@@ -923,21 +932,31 @@ func TestCancelTask_WithDevContainer(t *testing.T) {
 		t.Fatalf("CancelTask() error: %v", err)
 	}
 
-	// Should have 7 calls: stop/rm skiff, stop/rm gate, stop/rm dev, volume rm.
-	if len(*calls) != 7 {
-		t.Fatalf("expected 7 podman calls, got %d", len(*calls))
+	// Should have 9 calls: stop/rm skiff, stop/rm gate, stop/rm mcp, stop/rm dev, volume rm.
+	if len(*calls) != 9 {
+		t.Fatalf("expected 9 podman calls, got %d", len(*calls))
 	}
 
-	// Verify dev container cleanup calls.
-	stopDev := strings.Join((*calls)[4], " ")
+	// Verify MCP container cleanup calls (indices 4-5).
+	stopMCP := strings.Join((*calls)[4], " ")
+	if !strings.Contains(stopMCP, "stop --time 10 mcp-task-dc") {
+		t.Errorf("expected stop mcp call, got: %s", stopMCP)
+	}
+	rmMCP := strings.Join((*calls)[5], " ")
+	if !strings.Contains(rmMCP, "rm -f mcp-task-dc") {
+		t.Errorf("expected rm mcp call, got: %s", rmMCP)
+	}
+
+	// Verify dev container cleanup calls (indices 6-7).
+	stopDev := strings.Join((*calls)[6], " ")
 	if !strings.Contains(stopDev, "stop --time 10 dev-task-dc") {
 		t.Errorf("expected stop dev call, got: %s", stopDev)
 	}
-	rmDev := strings.Join((*calls)[5], " ")
+	rmDev := strings.Join((*calls)[7], " ")
 	if !strings.Contains(rmDev, "rm -f dev-task-dc") {
 		t.Errorf("expected rm dev call, got: %s", rmDev)
 	}
-	volRm := strings.Join((*calls)[6], " ")
+	volRm := strings.Join((*calls)[8], " ")
 	if !strings.Contains(volRm, "volume rm workspace-task-dc") {
 		t.Errorf("expected volume rm call, got: %s", volRm)
 	}
@@ -1033,4 +1052,361 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	return b
+}
+
+// fakeDial is a dial function that always succeeds (used to simulate MCP ready).
+func fakeDial(network, addr string, timeout time.Duration) error {
+	return nil
+}
+
+// failDial is a dial function that always fails (used to simulate MCP not ready).
+func failDial(network, addr string, timeout time.Duration) error {
+	return fmt.Errorf("connection refused")
+}
+
+func TestMCPContainerName(t *testing.T) {
+	tests := []struct {
+		taskID string
+		want   string
+	}{
+		{"abc123", "mcp-abc123"},
+		{"task-uuid-1234", "mcp-task-uuid-1234"},
+		{"", "mcp-"},
+	}
+	for _, tt := range tests {
+		if got := MCPContainerName(tt.taskID); got != tt.want {
+			t.Errorf("MCPContainerName(%q) = %q, want %q", tt.taskID, got, tt.want)
+		}
+	}
+}
+
+func TestRunTask_WithMCPServer(t *testing.T) {
+	// Simulate gate start success, MCP start success, skiff start success.
+	// MCP readiness is stubbed via fakeDial (instant success).
+	execFn, calls := fakeExecCommand(t, "container-id-123\n", 0)
+	p := &PodmanRuntime{
+		PodmanBin:           "podman",
+		execCommand:         execFn,
+		dialFn:              fakeDial,
+		mcpReadinessTimeout: 100 * time.Millisecond,
+		mcpRetryInterval:    10 * time.Millisecond,
+	}
+
+	spec := TaskSpec{
+		TaskID:      "task-mcp",
+		Image:       "quay.io/alcove/skiff:latest",
+		GateImage:   "quay.io/alcove/gate:latest",
+		Env:         map[string]string{"TASK_ID": "task-mcp", "MCP_SERVER_URL": "http://mcp-task-mcp:3000"},
+		GateEnv:     map[string]string{"GATE_SCOPE": "read"},
+		Network:     "test-internal",
+		ExternalNet: "test-external",
+		MCPServerImage: "quay.io/mcp/server:latest",
+		MCPServerEnv:   map[string]string{"MCP_CONFIG": "value"},
+		MCPServerName:  "my-mcp",
+	}
+
+	handle, err := p.RunTask(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+	if handle.ID != "task-mcp" {
+		t.Errorf("handle.ID = %q, want %q", handle.ID, "task-mcp")
+	}
+
+	// Expect 3 calls: gate start, MCP start, skiff start.
+	if len(*calls) != 3 {
+		t.Fatalf("expected 3 podman calls (gate + MCP + skiff), got %d\ncalls: %v", len(*calls), *calls)
+	}
+
+	// Call 0: gate start — dual network.
+	gateArgs := strings.Join((*calls)[0], " ")
+	if !strings.Contains(gateArgs, "--name gate-task-mcp") {
+		t.Errorf("gate call missing --name gate-task-mcp: %s", gateArgs)
+	}
+	if !strings.Contains(gateArgs, "--network test-internal,test-external") {
+		t.Errorf("gate call missing dual network: %s", gateArgs)
+	}
+
+	// Call 1: MCP start — internal network ONLY (no external access).
+	mcpArgs := strings.Join((*calls)[1], " ")
+	if !strings.Contains(mcpArgs, "--name mcp-task-mcp") {
+		t.Errorf("MCP call missing --name mcp-task-mcp: %s", mcpArgs)
+	}
+	if !strings.Contains(mcpArgs, "--network test-internal") {
+		t.Errorf("MCP call missing internal network: %s", mcpArgs)
+	}
+	if strings.Contains(mcpArgs, "test-external") {
+		t.Errorf("MCP call must NOT include external network: %s", mcpArgs)
+	}
+	if !strings.Contains(mcpArgs, "quay.io/mcp/server:latest") {
+		t.Errorf("MCP call missing MCP image: %s", mcpArgs)
+	}
+	if !strings.Contains(mcpArgs, "MCP_CONFIG=value") {
+		t.Errorf("MCP call missing MCP_CONFIG env: %s", mcpArgs)
+	}
+
+	// Call 2: skiff start — should include MCP_SERVER_URL and MCP in NO_PROXY.
+	skiffArgs := strings.Join((*calls)[2], " ")
+	if !strings.Contains(skiffArgs, "--name skiff-task-mcp") {
+		t.Errorf("skiff call missing --name skiff-task-mcp: %s", skiffArgs)
+	}
+	if !strings.Contains(skiffArgs, "MCP_SERVER_URL=http://mcp-task-mcp:3000") {
+		t.Errorf("skiff call missing MCP_SERVER_URL: %s", skiffArgs)
+	}
+	// MCP container name should be in NO_PROXY so Skiff reaches it directly.
+	if !strings.Contains(skiffArgs, "mcp-task-mcp") {
+		t.Errorf("skiff NO_PROXY should include mcp container name: %s", skiffArgs)
+	}
+}
+
+func TestRunTask_WithMCPServer_NoDevContainer(t *testing.T) {
+	// MCP + no dev container: gate, MCP, skiff (3 calls, no volume create).
+	execFn, calls := fakeExecCommand(t, "container-id-123\n", 0)
+	p := &PodmanRuntime{
+		PodmanBin:           "podman",
+		execCommand:         execFn,
+		dialFn:              fakeDial,
+		mcpReadinessTimeout: 100 * time.Millisecond,
+		mcpRetryInterval:    10 * time.Millisecond,
+	}
+
+	spec := TaskSpec{
+		TaskID:         "task-mcp-nodc",
+		Image:          "quay.io/alcove/skiff:latest",
+		GateImage:      "quay.io/alcove/gate:latest",
+		Network:        "test-internal",
+		ExternalNet:    "test-external",
+		MCPServerImage: "quay.io/mcp/server:latest",
+	}
+
+	_, err := p.RunTask(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+
+	// 3 calls: gate, MCP, skiff. No volume or dev container.
+	if len(*calls) != 3 {
+		t.Fatalf("expected 3 podman calls, got %d", len(*calls))
+	}
+
+	for _, call := range *calls {
+		args := strings.Join(call, " ")
+		if strings.Contains(args, "volume create") {
+			t.Errorf("unexpected volume create call: %s", args)
+		}
+		if strings.Contains(args, "--name dev-") {
+			t.Errorf("unexpected dev container call: %s", args)
+		}
+	}
+}
+
+func TestRunTask_WithMCPServer_ReadinessTimeout_HardFail(t *testing.T) {
+	// MCP readiness times out (failDial) and MCPFailureMode is "" (default = fail).
+	// Expect: gate start, MCP start, MCP stop, MCP rm, gate stop, gate rm, then error.
+	execFn, calls := fakeExecCommand(t, "", 0)
+	p := &PodmanRuntime{
+		PodmanBin:           "podman",
+		execCommand:         execFn,
+		dialFn:              failDial,
+		mcpReadinessTimeout: 50 * time.Millisecond, // short timeout for fast test
+		mcpRetryInterval:    10 * time.Millisecond,
+	}
+
+	spec := TaskSpec{
+		TaskID:         "task-mcp-fail",
+		Image:          "quay.io/alcove/skiff:latest",
+		GateImage:      "quay.io/alcove/gate:latest",
+		Network:        "test-internal",
+		ExternalNet:    "test-external",
+		MCPServerImage: "quay.io/mcp/server:latest",
+		MCPFailureMode: "", // default = fail hard
+	}
+
+	_, err := p.RunTask(context.Background(), spec)
+	if err == nil {
+		t.Fatal("RunTask() expected error when MCP readiness times out")
+	}
+	if !strings.Contains(err.Error(), "not ready") {
+		t.Errorf("expected 'not ready' in error, got: %v", err)
+	}
+
+	// Verify gate was started then cleaned up.
+	allArgs := make([]string, 0, len(*calls))
+	for _, call := range *calls {
+		allArgs = append(allArgs, strings.Join(call, " "))
+	}
+	allArgsStr := strings.Join(allArgs, "\n")
+	if !strings.Contains(allArgsStr, "--name gate-task-mcp-fail") {
+		t.Errorf("gate was not started: %s", allArgsStr)
+	}
+	if !strings.Contains(allArgsStr, "--name mcp-task-mcp-fail") {
+		t.Errorf("MCP was not started: %s", allArgsStr)
+	}
+	// gate and MCP should be cleaned up.
+	if !strings.Contains(allArgsStr, "stop --time 10 mcp-task-mcp-fail") {
+		t.Errorf("MCP container not stopped on cleanup: %s", allArgsStr)
+	}
+	if !strings.Contains(allArgsStr, "stop --time 10 gate-task-mcp-fail") {
+		t.Errorf("gate container not stopped on cleanup: %s", allArgsStr)
+	}
+	// Skiff must NOT have been started.
+	if strings.Contains(allArgsStr, "--name skiff-task-mcp-fail") {
+		t.Errorf("skiff must NOT be started when MCP readiness fails: %s", allArgsStr)
+	}
+}
+
+func TestRunTask_WithMCPServer_FailureContinue(t *testing.T) {
+	// MCP readiness times out but MCPFailureMode="continue".
+	// Expect: gate start, MCP start, MCP stop (cleanup), skiff start WITHOUT MCP env vars.
+	execFn, calls := fakeExecCommand(t, "container-id-123\n", 0)
+	p := &PodmanRuntime{
+		PodmanBin:           "podman",
+		execCommand:         execFn,
+		dialFn:              failDial,
+		mcpReadinessTimeout: 50 * time.Millisecond, // short timeout for fast test
+		mcpRetryInterval:    10 * time.Millisecond,
+	}
+
+	spec := TaskSpec{
+		TaskID:      "task-mcp-cont",
+		Image:       "quay.io/alcove/skiff:latest",
+		GateImage:   "quay.io/alcove/gate:latest",
+		Network:     "test-internal",
+		ExternalNet: "test-external",
+		Env: map[string]string{
+			"MCP_SERVER_URL":  "http://mcp-task-mcp-cont:3000",
+			"MCP_SERVER_NAME": "my-mcp",
+			"MCP_TOOL_FILTER": `["tool1"]`,
+			"TASK_ID":         "task-mcp-cont",
+		},
+		MCPServerImage: "quay.io/mcp/server:latest",
+		MCPFailureMode: "continue",
+	}
+
+	_, err := p.RunTask(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunTask() should succeed with MCPFailureMode=continue, got: %v", err)
+	}
+
+	// Find the skiff start call.
+	var skiffArgs string
+	for _, call := range *calls {
+		args := strings.Join(call, " ")
+		if strings.Contains(args, "--name skiff-task-mcp-cont") {
+			skiffArgs = args
+			break
+		}
+	}
+	if skiffArgs == "" {
+		t.Fatal("skiff was not started")
+	}
+
+	// MCP env vars must NOT be passed to Skiff when MCP failed and mode=continue.
+	if strings.Contains(skiffArgs, "MCP_SERVER_URL=") {
+		t.Errorf("skiff must NOT receive MCP_SERVER_URL when MCPFailureMode=continue: %s", skiffArgs)
+	}
+	if strings.Contains(skiffArgs, "MCP_SERVER_NAME=") {
+		t.Errorf("skiff must NOT receive MCP_SERVER_NAME when MCPFailureMode=continue: %s", skiffArgs)
+	}
+	if strings.Contains(skiffArgs, "MCP_TOOL_FILTER=") {
+		t.Errorf("skiff must NOT receive MCP_TOOL_FILTER when MCPFailureMode=continue: %s", skiffArgs)
+	}
+
+	// TASK_ID should still be passed.
+	if !strings.Contains(skiffArgs, "TASK_ID=task-mcp-cont") {
+		t.Errorf("skiff missing non-MCP env vars: %s", skiffArgs)
+	}
+
+	// MCP container must have been cleaned up.
+	allArgsStr := ""
+	for _, call := range *calls {
+		allArgsStr += strings.Join(call, " ") + "\n"
+	}
+	if !strings.Contains(allArgsStr, "stop --time 10 mcp-task-mcp-cont") {
+		t.Errorf("MCP container not cleaned up on continue mode: %s", allArgsStr)
+	}
+}
+
+func TestCancelTask_WithMCPServer(t *testing.T) {
+	execFn, calls := fakeExecCommand(t, "", 0)
+	p := &PodmanRuntime{
+		PodmanBin:   "podman",
+		execCommand: execFn,
+	}
+
+	handle := TaskHandle{ID: "task-mcp-cancel", PodName: "skiff-task-mcp-cancel"}
+	err := p.CancelTask(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("CancelTask() error: %v", err)
+	}
+
+	// Should have 9 calls: stop/rm skiff, stop/rm gate, stop/rm mcp, stop/rm dev, volume rm.
+	if len(*calls) != 9 {
+		t.Fatalf("expected 9 podman calls, got %d\ncalls: %v", len(*calls), *calls)
+	}
+
+	allArgsStr := ""
+	for _, call := range *calls {
+		allArgsStr += strings.Join(call, " ") + "\n"
+	}
+
+	// Verify MCP container cleanup calls.
+	if !strings.Contains(allArgsStr, "stop --time 10 mcp-task-mcp-cancel") {
+		t.Errorf("expected stop mcp call: %s", allArgsStr)
+	}
+	if !strings.Contains(allArgsStr, "rm -f mcp-task-mcp-cancel") {
+		t.Errorf("expected rm mcp call: %s", allArgsStr)
+	}
+}
+
+func TestWaitForTCPReady_Success(t *testing.T) {
+	// Should return nil when dialFn succeeds immediately.
+	err := waitForTCPReady(context.Background(), "localhost:3000", 100*time.Millisecond, 10*time.Millisecond, fakeDial)
+	if err != nil {
+		t.Errorf("waitForTCPReady() with success dial: got error %v", err)
+	}
+}
+
+func TestWaitForTCPReady_Timeout(t *testing.T) {
+	// Should return error when dialFn always fails within the timeout.
+	err := waitForTCPReady(context.Background(), "localhost:3000", 50*time.Millisecond, 10*time.Millisecond, failDial)
+	if err == nil {
+		t.Error("waitForTCPReady() with fail dial: expected error, got nil")
+	}
+}
+
+func TestRunTask_NoMCPServer_Unaffected(t *testing.T) {
+	// Verify non-MCP sessions are completely unaffected.
+	execFn, calls := fakeExecCommand(t, "container-id-123\n", 0)
+	p := &PodmanRuntime{
+		PodmanBin:   "podman",
+		execCommand: execFn,
+	}
+
+	spec := TaskSpec{
+		TaskID:      "task-nomcp",
+		Image:       "quay.io/alcove/skiff:latest",
+		GateImage:   "quay.io/alcove/gate:latest",
+		Env:         map[string]string{"TASK_ID": "task-nomcp"},
+		Network:     "test-internal",
+		ExternalNet: "test-external",
+		// MCPServerImage intentionally NOT set.
+	}
+
+	_, err := p.RunTask(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+
+	// Expect exactly 2 calls: gate + skiff. No MCP container.
+	if len(*calls) != 2 {
+		t.Fatalf("expected 2 podman calls, got %d", len(*calls))
+	}
+
+	for _, call := range *calls {
+		args := strings.Join(call, " ")
+		if strings.Contains(args, "--name mcp-") {
+			t.Errorf("non-MCP session must NOT start MCP container: %s", args)
+		}
+	}
 }

@@ -20,8 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // PodmanRuntime implements the Runtime interface using the podman CLI.
@@ -31,6 +33,18 @@ type PodmanRuntime struct {
 
 	// execCommand is a hook for testing. If nil, exec.CommandContext is used.
 	execCommand func(ctx context.Context, name string, args ...string) *exec.Cmd
+
+	// dialFn is injectable for testing MCP TCP readiness checks.
+	// If nil, net.DialTimeout is used.
+	dialFn func(network, addr string, timeout time.Duration) error
+
+	// mcpReadinessTimeout is the total time to wait for the MCP sidecar to be ready.
+	// Defaults to 30 seconds if zero.
+	mcpReadinessTimeout time.Duration
+
+	// mcpRetryInterval is the time between TCP poll attempts.
+	// Defaults to 1 second if zero.
+	mcpRetryInterval time.Duration
 }
 
 // Default network names for the dual-network isolation pattern.
@@ -137,13 +151,74 @@ func WorkspaceVolumeName(taskID string) string {
 	return "workspace-" + taskID
 }
 
+// waitForTCPReady polls a TCP endpoint until it accepts connections or the
+// deadline expires. The dialFn parameter is injectable for testing; pass nil
+// to use the default net.DialTimeout. Returns nil on success, or an error if
+// the deadline is reached or the context is cancelled.
+func waitForTCPReady(ctx context.Context, addr string, totalTimeout time.Duration, retryInterval time.Duration, dialFn func(network, addr string, timeout time.Duration) error) error {
+	if dialFn == nil {
+		dialFn = func(network, addr string, timeout time.Duration) error {
+			conn, err := net.DialTimeout(network, addr, timeout)
+			if err != nil {
+				return err
+			}
+			conn.Close()
+			return nil
+		}
+	}
+	deadline := time.Now().Add(totalTimeout)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := dialFn("tcp", addr, retryInterval); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+	}
+	return fmt.Errorf("TCP endpoint %s not ready after %s", addr, totalTimeout)
+}
+
+// isMCPContainerExited checks if an MCP container has exited by inspecting its state.
+// Returns true if the container has exited (useful for detecting crash-on-startup).
+func (p *PodmanRuntime) isMCPContainerExited(ctx context.Context, name string) bool {
+	out, err := p.run(ctx, "inspect", "--format", "json", name)
+	if err != nil {
+		return false // container doesn't exist or inspect failed
+	}
+	var containers []podmanInspect
+	if err := json.Unmarshal(out, &containers); err != nil || len(containers) == 0 {
+		return false
+	}
+	status := strings.ToLower(containers[0].State.Status)
+	return status == "exited" || status == "stopped"
+}
+
 // RunTask starts a skiff container and its gate sidecar using dual-network
 // isolation. Gate is attached to both the internal and external networks so
 // it can proxy traffic to external services. Skiff is attached ONLY to the
 // internal network so it cannot reach the internet directly.
+//
+// Startup order when MCPServerImage is set:
+//  1. Gate sidecar (internal+external networks)
+//  2. MCP server sidecar (internal network only — no internet access)
+//  3. TCP readiness poll on MCP port 3000 (30s timeout)
+//  4. Dev container sidecar (if configured)
+//  5. Skiff main container
 func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle, error) {
 	skiffName := SkiffContainerName(spec.TaskID)
 	gateName := GateContainerName(spec.TaskID)
+	mcpName := MCPContainerName(spec.TaskID)
 	internalNet := spec.Network
 	if internalNet == "" {
 		internalNet = DefaultInternalNetwork
@@ -179,12 +254,82 @@ func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle,
 		return TaskHandle{}, fmt.Errorf("starting gate sidecar: %w", err)
 	}
 
+	// Start MCP server sidecar if configured.
+	// MCP is on the internal network only — it cannot reach the internet directly.
+	// Startup order: Gate → MCP → TCP readiness → dev container → Skiff.
+	mcpStarted := false
+	if spec.MCPServerImage != "" {
+		mcpArgs := []string{"run", "-d"}
+		if !spec.Debug {
+			mcpArgs = append(mcpArgs, "--rm")
+		}
+		mcpArgs = append(mcpArgs,
+			"--name", mcpName,
+			"--network", internalNet, // internal only — no external access
+		)
+		for k, v := range spec.MCPServerEnv {
+			mcpArgs = append(mcpArgs, "--env", k+"="+v)
+		}
+		mcpArgs = append(mcpArgs, spec.MCPServerImage)
+
+		if _, err := p.run(ctx, mcpArgs...); err != nil {
+			_ = p.stopAndRemove(ctx, gateName)
+			return TaskHandle{}, fmt.Errorf("starting MCP server sidecar %s: %w", spec.MCPServerName, err)
+		}
+		mcpStarted = true
+
+		// Wait for the MCP server to be ready on TCP port 3000.
+		readinessTimeout := p.mcpReadinessTimeout
+		if readinessTimeout == 0 {
+			readinessTimeout = 30 * time.Second
+		}
+		retryInterval := p.mcpRetryInterval
+		if retryInterval == 0 {
+			retryInterval = 1 * time.Second
+		}
+
+		mcpAddr := mcpName + ":3000"
+		mcpReady := waitForTCPReady(ctx, mcpAddr, readinessTimeout, retryInterval, p.dialFn)
+
+		if mcpReady != nil {
+			// MCP readiness check failed. Check if the container crashed.
+			if p.isMCPContainerExited(ctx, mcpName) {
+				_ = p.stopAndRemove(ctx, mcpName)
+				_ = p.stopAndRemove(ctx, gateName)
+				return TaskHandle{}, fmt.Errorf("MCP server container %s exited before becoming ready", mcpName)
+			}
+
+			// Readiness timeout — apply failure mode.
+			if spec.MCPFailureMode == "continue" {
+				log.Printf("warning: MCP server %s not ready after %s; MCPFailureMode=continue, starting Skiff without MCP", mcpName, readinessTimeout)
+				_ = p.stopAndRemove(ctx, mcpName)
+				mcpStarted = false
+				// Remove MCP env vars from spec.Env so Skiff does not receive them.
+				// The dispatcher injected MCP_SERVER_URL/MCP_SERVER_NAME/MCP_TOOL_FILTER
+				// into spec.Env; delete them so Skiff starts without MCP context.
+				delete(spec.Env, "MCP_SERVER_URL")
+				delete(spec.Env, "MCP_SERVER_NAME")
+				delete(spec.Env, "MCP_TOOL_FILTER")
+			} else {
+				// Default: fail hard.
+				_ = p.stopAndRemove(ctx, mcpName)
+				_ = p.stopAndRemove(ctx, gateName)
+				return TaskHandle{}, fmt.Errorf("MCP server %s not ready after %s: %w", mcpName, readinessTimeout, mcpReady)
+			}
+		} else {
+			log.Printf("MCP server %s ready on port 3000", mcpName)
+		}
+	}
+
 	// Start dev container sidecar if configured.
 	devName := DevContainerName(spec.TaskID)
 	workspaceVol := WorkspaceVolumeName(spec.TaskID)
 	if spec.DevContainerImage != "" {
 		// Create a shared workspace volume for Skiff ↔ dev container.
 		if _, err := p.run(ctx, "volume", "create", workspaceVol); err != nil {
+			if mcpStarted {
+				_ = p.stopAndRemove(ctx, mcpName)
+			}
 			_ = p.stopAndRemove(ctx, gateName)
 			return TaskHandle{}, fmt.Errorf("creating workspace volume: %w", err)
 		}
@@ -214,7 +359,10 @@ func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle,
 		devArgs = append(devArgs, spec.DevContainerImage)
 
 		if _, err := p.run(ctx, devArgs...); err != nil {
-			// Clean up gate + volume on dev container failure.
+			// Clean up gate + MCP + volume on dev container failure.
+			if mcpStarted {
+				_ = p.stopAndRemove(ctx, mcpName)
+			}
 			_ = p.stopAndRemove(ctx, gateName)
 			_, _ = p.run(ctx, "volume", "rm", workspaceVol)
 			return TaskHandle{}, fmt.Errorf("starting dev container: %w", err)
@@ -270,6 +418,10 @@ func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle,
 		if spec.DevContainerImage != "" {
 			noProxyBase += "," + devName
 		}
+		// Also exempt the MCP sidecar from proxy so Skiff can reach it directly.
+		if mcpStarted {
+			noProxyBase += "," + mcpName
+		}
 		if _, ok := skiffEnv["NO_PROXY"]; !ok {
 			skiffEnv["NO_PROXY"] = noProxyBase
 		}
@@ -281,7 +433,10 @@ func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle,
 	skiffArgs = append(skiffArgs, spec.Image)
 
 	if _, err := p.run(ctx, skiffArgs...); err != nil {
-		// Clean up the gate container (and dev container + volume if present).
+		// Clean up the gate container (and MCP, dev container + volume if present).
+		if mcpStarted {
+			_ = p.stopAndRemove(ctx, mcpName)
+		}
 		if spec.DevContainerImage != "" {
 			_ = p.stopAndRemove(ctx, devName)
 			_, _ = p.run(ctx, "volume", "rm", workspaceVol)
@@ -296,11 +451,12 @@ func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle,
 	}, nil
 }
 
-// CancelTask stops and removes both the skiff and gate containers for a task.
-// It also cleans up any dev container and workspace volume associated with the task.
+// CancelTask stops and removes the skiff, gate, MCP sidecar, and dev containers
+// for a task. It also cleans up any workspace volume associated with the task.
 func (p *PodmanRuntime) CancelTask(ctx context.Context, handle TaskHandle) error {
 	skiffName := SkiffContainerName(handle.ID)
 	gateName := GateContainerName(handle.ID)
+	mcpName := MCPContainerName(handle.ID)
 	devName := DevContainerName(handle.ID)
 	workspaceVol := WorkspaceVolumeName(handle.ID)
 
@@ -311,6 +467,8 @@ func (p *PodmanRuntime) CancelTask(ctx context.Context, handle TaskHandle) error
 	if err := p.stopAndRemove(ctx, gateName); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	// Always attempt MCP container cleanup (no-op if not present).
+	_ = p.stopAndRemove(ctx, mcpName)
 	// Always attempt dev container cleanup (no-op if not present).
 	_ = p.stopAndRemove(ctx, devName)
 	// Always attempt workspace volume cleanup (no-op if not present).
