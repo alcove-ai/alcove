@@ -119,6 +119,10 @@ type TaskRequest struct {
 	TripleTeam      bool                     `json:"triple_team,omitempty"`
 	EnforcementMode string                  `json:"-"` // "enforce" (default) or "monitor"
 	DevContainer    *DevContainerSpec       `json:"dev_container,omitempty"`
+	// MCPServer and MCPPlugins are set internally from the agent definition.
+	// TODO(Issue B): dispatcher translates MCPServer → MCP_SERVER_URL env var via MCPServers config lookup.
+	MCPServer  string   `json:"-"` // Operator-configured MCP server name
+	MCPPlugins []string `json:"-"` // Plugin names to expose from the MCP server
 	// Task metadata — set by dispatch code paths, stored in sessions table.
 	TaskName          string `json:"-"` // Schedule/agent definition name
 	TriggerType       string `json:"-"` // "event", "cron", "manual", "webhook"

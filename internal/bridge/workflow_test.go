@@ -1468,3 +1468,108 @@ workflow:
 		t.Errorf("Expected max_retries to be 3 but got %d", verifyStep.MaxRetries)
 	}
 }
+
+// TestParseWorkflowDefinitionWithMCPFields verifies that mcp_tools and mcp_failure
+// parse correctly on a workflow step.
+func TestParseWorkflowDefinitionWithMCPFields(t *testing.T) {
+	yamlData := `
+name: MCP Workflow
+workflow:
+  - id: browse
+    agent: browser-agent
+    mcp_tools:
+      - browser.*
+      - filesystem.read
+    mcp_failure: continue
+`
+	wd, err := ParseWorkflowDefinition([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := wd.Workflow[0]
+	if len(step.MCPTools) != 2 {
+		t.Fatalf("MCPTools length: got %d, want 2", len(step.MCPTools))
+	}
+	if step.MCPTools[0] != "browser.*" {
+		t.Errorf("MCPTools[0]: got %q, want %q", step.MCPTools[0], "browser.*")
+	}
+	if step.MCPTools[1] != "filesystem.read" {
+		t.Errorf("MCPTools[1]: got %q, want %q", step.MCPTools[1], "filesystem.read")
+	}
+	if step.MCPFailure != "continue" {
+		t.Errorf("MCPFailure: got %q, want %q", step.MCPFailure, "continue")
+	}
+}
+
+// TestMCPFailureValidation verifies that mcp_failure is validated as an enum.
+func TestMCPFailureValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		mcpFailure string
+		wantErr    bool
+	}{
+		{"empty (default)", "", false},
+		{"fail", "fail", false},
+		{"continue", "continue", false},
+		{"invalid", "ignore", true},
+		{"invalid uppercase", "FAIL", true},
+		{"invalid partial", "cont", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			yamlData := `
+name: Test Workflow
+workflow:
+  - id: step1
+    agent: some-agent
+    mcp_failure: ` + tt.mcpFailure
+			// Empty mcpFailure requires a different YAML (omit the field)
+			if tt.mcpFailure == "" {
+				yamlData = `
+name: Test Workflow
+workflow:
+  - id: step1
+    agent: some-agent
+`
+			}
+			_, err := ParseWorkflowDefinition([]byte(yamlData))
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for mcp_failure=%q, got nil", tt.mcpFailure)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for mcp_failure=%q: %v", tt.mcpFailure, err)
+			}
+		})
+	}
+}
+
+// TestMatchMCPTool verifies the MatchMCPTool function.
+func TestMatchMCPTool(t *testing.T) {
+	tests := []struct {
+		name     string
+		pattern  string
+		toolName string
+		want     bool
+	}{
+		{"exact match", "browser.click", "browser.click", true},
+		{"exact no match", "browser.click", "browser.navigate", false},
+		{"wildcard matches prefix", "browser.*", "browser.click", true},
+		{"wildcard matches another", "browser.*", "browser.navigate", true},
+		{"wildcard no match different prefix", "browser.*", "filesystem.read", false},
+		{"wildcard no match bare prefix", "browser.*", "browser", false},
+		{"wildcard with sub-prefix", "filesystem.*", "filesystem.read", true},
+		{"empty pattern", "", "browser.click", false},
+		{"empty tool name", "browser.*", "", false},
+		{"both empty", "", "", true},
+		{"star only pattern", "*", "anything", false},
+		{"wildcard matches literal dot-star tool", "browser.*", "browser.*", true}, // "browser.*" starts with "browser."
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchMCPTool(tt.pattern, tt.toolName)
+			if got != tt.want {
+				t.Errorf("MatchMCPTool(%q, %q) = %v, want %v", tt.pattern, tt.toolName, got, tt.want)
+			}
+		})
+	}
+}

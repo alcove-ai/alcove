@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1019,7 +1020,7 @@ func setupEnv(task internal.Task) {
 
 	// Configure Claude Code: skip onboarding (prevents startup API key validation
 	// that bypasses ANTHROPIC_BASE_URL) and set up MCP servers if specified.
-	configureClaude(os.Getenv("ALCOVE_MCP_CONFIG"))
+	configureClaude(os.Getenv("ALCOVE_MCP_CONFIG"), os.Getenv("MCP_SERVER_URL"), os.Getenv("MCP_SERVER_NAME"))
 
 	// Load skill/agent repos if specified.
 	loadSkillRepos()
@@ -1037,20 +1038,60 @@ func setupEnv(task internal.Task) {
 // hasCompletedOnboarding prevents Claude Code from validating the API key at startup
 // via a direct CONNECT tunnel to api.anthropic.com, which bypasses Gate's credential
 // injection.
-func configureClaude(mcpConfigJSON string) {
+//
+// mcpConfigJSON is the raw JSON from ALCOVE_MCP_CONFIG (operator-provided MCP server entries).
+// mcpServerURL is from MCP_SERVER_URL (set by the dispatcher when an agent definition
+// specifies mcp_server). mcpServerName is from MCP_SERVER_NAME (defaults to "mcp-server").
+//
+// TODO(Issue B): MCP_SERVER_URL is set by the dispatcher after translating the agent
+// definition's mcp_server field through the MCPServers operator config. Until that wiring
+// exists, MCP_SERVER_URL must be injected externally (e.g., in tests or future runtime code).
+func configureClaude(mcpConfigJSON, mcpServerURL, mcpServerName string) {
 	// Build the Claude Code config structure
 	claudeConfig := map[string]any{
 		"hasCompletedOnboarding": true,
 	}
 
-	// Add MCP servers if configured
+	// Start with an empty MCP servers map; merge all sources into it.
+	mcpServers := map[string]any{}
+
+	// Add operator-provided MCP servers from ALCOVE_MCP_CONFIG.
 	if mcpConfigJSON != "" {
-		var mcpServers map[string]any
-		if err := json.Unmarshal([]byte(mcpConfigJSON), &mcpServers); err != nil {
+		var operatorServers map[string]any
+		if err := json.Unmarshal([]byte(mcpConfigJSON), &operatorServers); err != nil {
 			log.Printf("warning: invalid ALCOVE_MCP_CONFIG: %v", err)
 		} else {
-			claudeConfig["mcpServers"] = mcpServers
+			for k, v := range operatorServers {
+				mcpServers[k] = v
+			}
 		}
+	}
+
+	// Add session-specific MCP server from MCP_SERVER_URL.
+	// MCP_TOOL_FILTER is read here for future enforcement (Issue B).
+	mcpToolFilter := os.Getenv("MCP_TOOL_FILTER")
+	if mcpToolFilter != "" {
+		log.Printf("MCP_TOOL_FILTER=%q (tool filtering enforcement deferred to Issue B)", mcpToolFilter)
+	}
+
+	if mcpServerURL != "" {
+		serverURL, err := validateMCPServerURL(mcpServerURL)
+		if err != nil {
+			log.Printf("warning: invalid MCP_SERVER_URL %q: %v", mcpServerURL, err)
+		} else {
+			if mcpServerName == "" {
+				mcpServerName = "mcp-server"
+			}
+			mcpServers[mcpServerName] = map[string]any{
+				"type": "sse",
+				"url":  serverURL,
+			}
+			log.Printf("MCP server %q registered at %s", mcpServerName, serverURL)
+		}
+	}
+
+	if len(mcpServers) > 0 {
+		claudeConfig["mcpServers"] = mcpServers
 	}
 
 	// Determine home directory
@@ -1082,6 +1123,33 @@ func configureClaude(mcpConfigJSON string) {
 	}
 	settingsData, _ := json.MarshalIndent(settings, "", "  ")
 	os.WriteFile(settingsPath, settingsData, 0644)
+}
+
+// validateMCPServerURL validates and returns the MCP server URL.
+// It uses net/url.Parse() to prevent userinfo-injection attacks where a crafted
+// URL (e.g. http://localhost@evil.com/mcp) could bypass network isolation by
+// routing to an unexpected host.
+func validateMCPServerURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("URL parse error: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("URL has no host")
+	}
+	// Reject URLs with userinfo (e.g. http://user@host/path) — these can
+	// be used to trick naive hostname checks while routing to a different host.
+	if u.User != nil {
+		return "", fmt.Errorf("URL must not contain userinfo")
+	}
+	hostname := u.Hostname()
+	if hostname == "" {
+		return "", fmt.Errorf("URL has no hostname")
+	}
+	return u.String(), nil
 }
 
 // skillRepo represents a skill/agent repository to clone and load as a plugin.
