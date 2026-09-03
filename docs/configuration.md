@@ -824,11 +824,36 @@ of labels on the issue or PR.
 
 ### User-Based Trigger Filtering
 
-The `users` field provides a safety gate for event triggers. When specified,
-an event is only dispatched if the user who authored the comment or issue
-matches at least one of the listed GitHub usernames (case-insensitive). This
-prevents automated agents' own comments from re-triggering sessions and limits
-session dispatch to trusted users.
+The `users` and `exclude_users` fields filter events by the **event actor** — the
+GitHub login that performed the action (`sender.login` for webhooks,
+`actor.login` for polling). Matching is case-insensitive; blank entries are
+ignored. If either field has an effective (nonblank) value and an event has no
+actor, the event is rejected. A list containing only blank entries is treated
+as unset.
+
+**`exclude_users` — blocklist (evaluated first)**
+
+When specified, an event is dropped if the event actor matches any listed login.
+Exclusion is evaluated before the `users` allowlist; if a user appears in both
+lists, the event is blocked.
+
+```yaml
+name: milestone-planner
+trigger:
+  github:
+    events: [issues, issue_comment]
+    actions: [labeled, created]
+    repos: [alcove-ai/alcove]
+    labels: [needs-planning]
+    delivery_mode: polling
+    exclude_users: [alcove-bot]   # prevent bot replies from re-triggering
+```
+
+**`users` — allowlist**
+
+When specified, an event is only dispatched if the event actor matches at least
+one of the listed logins. If `users` is omitted or empty, all matching events
+are dispatched regardless of actor.
 
 ```yaml
 name: auto-fix
@@ -845,8 +870,8 @@ trigger:
     users: [bmbouter]
 ```
 
-If `users` is omitted or empty, all matching events are dispatched regardless
-of the event author.
+**Precedence:** `exclude_users` wins. If both are set and the actor appears in
+`exclude_users`, the event is blocked even if the actor also appears in `users`.
 
 ### Closed Issue/PR Filtering
 

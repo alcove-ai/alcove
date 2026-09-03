@@ -52,11 +52,15 @@ var githubEventTypeMap = map[string]string{
 // polling-mode event schedules and dispatches matching tasks.
 type GitHubPoller struct {
 	db             *pgxpool.Pool
-	dispatcher     *Dispatcher
+	dispatcher     eventTaskDispatcher
 	credStore      *CredentialStore
 	defStore       *AgentDefStore
 	workflowEngine *WorkflowEngine
 	client         *http.Client
+}
+
+type eventTaskDispatcher interface {
+	DispatchTask(context.Context, TaskRequest, string, ...string) (*internal.Session, error)
 }
 
 // pollSchedule holds the fields needed from a schedule for polling and dispatch.
@@ -178,11 +182,12 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, teamID string, schedu
 	// solely on the webhook_deliveries table for deduplication. No ID-based
 	// skipping — GitHub event IDs are not chronologically ordered.
 	type ghEvent struct {
-		ID        string                `json:"id"`
-		Type      string                `json:"type"`
-		Repo      struct{ Name string } `json:"repo"`
-		Payload   json.RawMessage       `json:"payload"`
-		CreatedAt time.Time             `json:"created_at"`
+		ID        string                 `json:"id"`
+		Type      string                 `json:"type"`
+		Actor     struct{ Login string } `json:"actor"`
+		Repo      struct{ Name string }  `json:"repo"`
+		Payload   json.RawMessage        `json:"payload"`
+		CreatedAt time.Time              `json:"created_at"`
 	}
 
 	var allEvents []ghEvent
@@ -390,27 +395,12 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, teamID string, schedu
 			}
 		}
 
-		// Extract user from comment, issue, or pull request.
-		var users []string
-		if comment, ok := payload["comment"].(map[string]interface{}); ok {
-			if user, ok := comment["user"].(map[string]interface{}); ok {
-				if login, ok := user["login"].(string); ok {
-					users = append(users, login)
-				}
-			}
-		} else if issue, ok := payload["issue"].(map[string]interface{}); ok {
-			if user, ok := issue["user"].(map[string]interface{}); ok {
-				if login, ok := user["login"].(string); ok {
-					users = append(users, login)
-				}
-			}
-		} else if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-			if user, ok := pr["user"].(map[string]interface{}); ok {
-				if login, ok := user["login"].(string); ok {
-					users = append(users, login)
-				}
-			}
-		}
+		// Extract the event actor from the top-level actor field.
+		// actor.login correctly identifies who performed the action for all
+		// event types: IssuesEvent (labeler), IssueCommentEvent (commenter),
+		// PullRequestReviewEvent (reviewer), PullRequestReviewCommentEvent
+		// (inline commenter). Falls back to nil slice if actor is not present.
+		users := githubEventActors(event.Actor.Login)
 
 		eventRepo := event.Repo.Name
 
