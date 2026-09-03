@@ -184,7 +184,8 @@ Alcove runs 6 automated pipelines defined in `.alcove/workflows/`. They are trig
 
 | Label | Trigger | Pipeline | What Happens |
 |-------|---------|----------|--------------|
-| `ready-for-dev` | GitHub issue labeled | **Full SDLC Pipeline** | Bot claims the issue (assigns `alcove-bot`, removes label), implements the change, creates PR, waits for CI, runs code + security review, rebases, merges. Full autonomous development cycle. |
+| `ready-for-dev` | GitHub issue labeled | **Full SDLC Pipeline** | Legacy autonomous pipeline. Bot claims the issue, implements the change, creates PR, waits for CI, runs code + security review, rebases, and merges. |
+| `ready-for-sdlc-v2` | GitHub issue labeled | **SDLC v2 Pipeline** | Opt-in pipeline. Bot claims the issue, implements the change, creates PR, waits for CI, runs code + security review, and notifies maintainers. The PR requires human review and manual merge. Do not apply both trigger labels. |
 | `ready-for-dev` | GitLab issue labeled | **GitLab SDLC Pipeline** | Same as above but using GitLab MRs, pipelines, and issue management. |
 | `ready-for-dev` | JIRA issue labeled | **JIRA SDLC Pipeline** | Same as above but triggered from JIRA, code goes to GitHub, closes JIRA issue and posts comment when done. |
 | `needs-planning` | GitHub issue labeled | **Milestone Planner** | Runs a 7-perspective planning committee (architect, security, devops, QA, UX, tech writer, performance). Produces an implementation plan in the issue body. Responds to follow-up comments on the issue. |
@@ -208,6 +209,10 @@ Alcove runs 6 automated pipelines defined in `.alcove/workflows/`. They are trig
 ```
 
 The JIRA pipeline adds two steps after merge: `close-jira` (transition to "Done") and `comment-jira` (post PR link).
+
+The opt-in SDLC v2 pipeline omits rebase, conflict resolution, and merge. It
+ends with `notify-ready` and `label-ready`; use `ready-for-sdlc-v2` when human
+review and manual merge are required.
 
 ### Reliability Features
 

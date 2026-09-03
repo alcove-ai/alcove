@@ -1,0 +1,190 @@
+name: SDLC v2 Pipeline
+trigger:
+  github:
+    events: [issues]
+    actions: [labeled]
+    labels: [ready-for-sdlc-v2]
+    repos: [alcove-ai/alcove]
+    delivery_mode: polling
+
+workflow:
+  - id: claim-issue
+    type: bridge
+    action: update-issue
+    inputs:
+      repo: alcove-ai/alcove
+      issue: "{{trigger.issue_number}}"
+      add_assignees: ["alcove-bot"]
+      remove_labels: ["ready-for-sdlc-v2"]
+
+  - id: implement
+    type: agent
+    agent: Autonomous Developer
+    depends: "claim-issue.Succeeded"
+    max_retries: 3
+    inputs:
+      branch: "issue-{{trigger.issue_number}}-fix"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [summary]
+
+  - id: pre-pr-verify
+    type: agent
+    agent: Branch Verifier
+    depends: "implement.Succeeded || pre-pr-revision.Succeeded"
+    max_iterations: 3
+    inputs:
+      branch: "{{steps.implement.inputs.branch}}"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not edit, commit, push, create PRs, comment, label, approve, or merge.
+    outputs: [verdict, findings, test_summary]
+    output_contract:
+      required: [verdict, findings, test_summary]
+      allowed_values:
+        verdict: ["pass", "revise"]
+      routing_field: verdict
+      success_value: "pass"
+
+  - id: pre-pr-revision
+    type: agent
+    agent: Autonomous Developer
+    depends: "pre-pr-verify.Failed"
+    max_iterations: 2
+    inputs:
+      branch: "{{steps.implement.inputs.branch}}"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      verification_feedback: "{{steps.pre-pr-verify.outputs.findings}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [summary]
+
+  - id: create-pr
+    type: bridge
+    action: create-merge-request
+    depends: "pre-pr-verify.Succeeded"
+    inputs:
+      repo: alcove-ai/alcove
+      branch: "{{steps.implement.inputs.branch}}"
+      title: "feat(#{{trigger.issue_number}}): {{trigger.issue_title}}"
+      base: main
+      body: |
+        Closes #{{trigger.issue_number}}
+
+        ## {{trigger.issue_title}}
+
+        ## Summary
+
+        {{steps.implement.outputs.summary}}
+
+  - id: await-ci
+    type: bridge
+    action: await-checks
+    depends: "create-pr.Succeeded || ci-fix.Succeeded"
+    max_iterations: 4
+    inputs:
+      repo: alcove-ai/alcove
+      pr: "{{steps.create-pr.outputs.pr_number}}"
+
+  - id: ci-fix
+    type: agent
+    agent: Autonomous Developer
+    depends: "await-ci.Failed"
+    max_iterations: 3
+    inputs:
+      branch: "{{steps.implement.inputs.branch}}"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      ci_logs: "{{steps.await-ci.outputs.failure_logs}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [summary]
+
+  - id: code-review
+    type: agent
+    agent: PR Reviewer
+    depends: "await-ci.Succeeded || revision.Succeeded"
+    max_iterations: 3
+    inputs:
+      pr: "{{steps.create-pr.outputs.pr_number}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [approved, comments]
+    output_contract:
+      required: [approved, comments]
+      allowed_values:
+        approved: ["true", "false"]
+      routing_field: approved
+      success_value: "true"
+
+  - id: security-review
+    type: agent
+    agent: Security Reviewer
+    depends: "await-ci.Succeeded || revision.Succeeded"
+    max_iterations: 3
+    inputs:
+      pr: "{{steps.create-pr.outputs.pr_number}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [approved, comments]
+    output_contract:
+      required: [approved, comments]
+      allowed_values:
+        approved: ["true", "false"]
+      routing_field: approved
+      success_value: "true"
+
+  - id: revision
+    type: agent
+    agent: Autonomous Developer
+    depends: "code-review.Failed || security-review.Failed"
+    max_iterations: 3
+    inputs:
+      branch: "{{steps.implement.inputs.branch}}"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      code_feedback: "{{steps.code-review.outputs.comments}}"
+      security_feedback: "{{steps.security-review.outputs.comments}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [summary]
+
+  - id: notify-ready
+    type: bridge
+    action: comment
+    depends: "code-review.Succeeded && security-review.Succeeded"
+    inputs:
+      repo: alcove-ai/alcove
+      pr: "{{steps.create-pr.outputs.pr_number}}"
+      body: |
+        ✅ **Automated review complete** — CI, code review, and security review passed.
+
+        This PR requires **human review and manual merge**.
+
+  - id: label-ready
+    type: bridge
+    action: update-issue
+    depends: "code-review.Succeeded && security-review.Succeeded"
+    inputs:
+      repo: alcove-ai/alcove
+      issue: "{{trigger.issue_number}}"
+      add_labels: ["needs-human-review"]

@@ -129,10 +129,12 @@ GitHub issue if the pipeline did not complete as expected.
 
 ### Overlapping work
 
-When multiple issues touch the same code, let the pipeline handle it. The SDLC
-pipeline includes rebase and conflict-resolve steps. If conflicts arise, the
-pipeline rebases and dispatches an agent to resolve them. File issues
-independently — don't serialize work waiting for other issues to merge.
+When multiple issues touch the same code, let the pipeline handle it. The
+legacy GitHub SDLC pipeline is triggered by `ready-for-dev` and remains
+autonomous. The opt-in SDLC v2 pipeline is triggered by `ready-for-sdlc-v2`,
+stops after automated review, and requires a human to review and merge the PR.
+Do not apply both trigger labels to the same issue. File issues independently —
+don't serialize work waiting for other issues to merge.
 
 ### Releases
 

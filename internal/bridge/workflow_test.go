@@ -16,6 +16,9 @@ package bridge
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -987,6 +990,112 @@ workflow:
 	}
 }
 
+func TestFeaturePipelineRetainsLegacyBehavior(t *testing.T) {
+	yamlData, err := os.ReadFile("../../.alcove/workflows/feature-pipeline.yml")
+	if err != nil {
+		t.Fatalf("read feature pipeline: %v", err)
+	}
+
+	wd, err := ParseWorkflowDefinition(yamlData)
+	if err != nil {
+		t.Fatalf("parse feature pipeline: %v", err)
+	}
+
+	if trigger := wd.Trigger; trigger == nil || trigger.GitHub == nil || !reflect.DeepEqual(trigger.GitHub.Labels, []string{"ready-for-dev"}) {
+		t.Fatal("feature pipeline must retain ready-for-dev trigger")
+	}
+
+	steps := make(map[string]WorkflowStep, len(wd.Workflow))
+	for _, step := range wd.Workflow {
+		steps[step.ID] = step
+	}
+
+	for _, id := range []string{"rebase", "conflict-resolve", "merge"} {
+		if _, ok := steps[id]; !ok {
+			t.Errorf("legacy feature pipeline must retain step %q", id)
+		}
+	}
+	if steps["await-ci"].Depends != "create-pr.Succeeded || ci-fix.Succeeded || rebase.Succeeded || conflict-resolve.Succeeded" {
+		t.Errorf("legacy await-ci dependency changed: %q", steps["await-ci"].Depends)
+	}
+}
+
+func TestSDLCv2RequiresHumanMerge(t *testing.T) {
+	yamlData, err := os.ReadFile("../../.alcove/workflows/sdlc-v2.yml")
+	if err != nil {
+		t.Fatalf("read SDLC v2 pipeline: %v", err)
+	}
+
+	wd, err := ParseWorkflowDefinition(yamlData)
+	if err != nil {
+		t.Fatalf("parse SDLC v2 pipeline: %v", err)
+	}
+	if trigger := wd.Trigger; trigger == nil || trigger.GitHub == nil || !reflect.DeepEqual(trigger.GitHub.Labels, []string{"ready-for-sdlc-v2"}) {
+		t.Fatal("SDLC v2 must use ready-for-sdlc-v2 trigger")
+	}
+
+	steps := make(map[string]WorkflowStep, len(wd.Workflow))
+	for _, step := range wd.Workflow {
+		steps[step.ID] = step
+		switch step.Action {
+		case "merge", "merge-pr", "merge-mr", "rebase", "rebase-pr", "rebase-mr":
+			t.Errorf("SDLC v2 must not contain merge or rebase action: step %q uses %q", step.ID, step.Action)
+		}
+		if step.ID == "rebase" || step.ID == "conflict-resolve" || step.ID == "merge" {
+			t.Errorf("SDLC v2 must not contain unsafe step %q", step.ID)
+		}
+	}
+	for _, id := range []string{"implement", "ci-fix", "code-review", "security-review", "revision"} {
+		context, ok := steps[id].Inputs["task_context"]
+		if !ok || !strings.Contains(fmt.Sprint(context), "clear, brief, lean, and direct") || !strings.Contains(fmt.Sprint(context), "Do not merge PRs") {
+			t.Errorf("SDLC v2 step %q must include concise, no-merge communication policy", id)
+		}
+	}
+	verify, ok := steps["pre-pr-verify"]
+	if !ok || verify.Agent != "Branch Verifier" || verify.Depends != "implement.Succeeded || pre-pr-revision.Succeeded" {
+		t.Errorf("SDLC v2 must verify the branch before PR creation, got %+v", verify)
+	}
+	if verify.MaxIterations != 3 || verify.OutputContract == nil || verify.OutputContract.SuccessValue != "pass" {
+		t.Errorf("pre-pr-verify must have bounded pass/revise contract, got %+v", verify.OutputContract)
+	}
+	if revision, ok := steps["pre-pr-revision"]; !ok || revision.Agent != "Autonomous Developer" || revision.Depends != "pre-pr-verify.Failed" {
+		t.Errorf("SDLC v2 must provide bounded pre-PR revision, got %+v", revision)
+	}
+	if createPR, ok := steps["create-pr"]; !ok || createPR.Depends != "pre-pr-verify.Succeeded" {
+		t.Errorf("create-pr must depend on pre-pr verification, got %+v", createPR)
+	}
+
+	notify, ok := steps["notify-ready"]
+	if !ok {
+		t.Fatal("SDLC v2 must notify maintainers")
+	}
+	if notify.Type != "bridge" || notify.Action != "comment" || notify.Inputs["repo"] != "alcove-ai/alcove" || notify.Inputs["pr"] != "{{steps.create-pr.outputs.pr_number}}" || fmt.Sprint(notify.Inputs["body"]) == "" {
+		t.Errorf("notify-ready must comment on the created PR, got action=%q inputs=%v", notify.Action, notify.Inputs)
+	}
+	if notify.Depends != "code-review.Succeeded && security-review.Succeeded" {
+		t.Errorf("notify-ready must depend on both reviewers, got %q", notify.Depends)
+	}
+
+	label, ok := steps["label-ready"]
+	if !ok {
+		t.Fatal("feature pipeline must escalate the originating issue")
+	}
+	if label.Type != "bridge" || label.Action != "update-issue" || label.Inputs["repo"] != "alcove-ai/alcove" || label.Inputs["issue"] != "{{trigger.issue_number}}" {
+		t.Errorf("label-ready must label the originating issue, got action=%q inputs=%v", label.Action, label.Inputs)
+	}
+	if !reflect.DeepEqual(label.Inputs["add_labels"], []interface{}{"needs-human-review"}) {
+		t.Errorf("label-ready must add needs-human-review, got %q", label.Inputs["add_labels"])
+	}
+	if label.Depends != "code-review.Succeeded && security-review.Succeeded" {
+		t.Errorf("label-ready must depend on both reviewers, got %q", label.Depends)
+	}
+
+	awaitCI, ok := steps["await-ci"]
+	if !ok || awaitCI.Depends != "create-pr.Succeeded || ci-fix.Succeeded" {
+		t.Errorf("SDLC v2 await-ci must only depend on create-pr and ci-fix, got %q", awaitCI.Depends)
+	}
+}
+
 func TestValidateConditionSyntax_Enhanced(t *testing.T) {
 	tests := []struct {
 		condition string
@@ -1408,7 +1517,6 @@ func TestValidateOutputContract(t *testing.T) {
 		})
 	}
 }
-
 
 func TestParseWorkflowDefinition_OutputContractWithRetry(t *testing.T) {
 	yamlData := `
