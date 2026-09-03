@@ -16,6 +16,9 @@ package bridge
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -987,6 +990,63 @@ workflow:
 	}
 }
 
+func TestFeaturePipelineRequiresHumanMerge(t *testing.T) {
+	yamlData, err := os.ReadFile("../../.alcove/workflows/feature-pipeline.yml")
+	if err != nil {
+		t.Fatalf("read feature pipeline: %v", err)
+	}
+
+	wd, err := ParseWorkflowDefinition(yamlData)
+	if err != nil {
+		t.Fatalf("parse feature pipeline: %v", err)
+	}
+
+	for _, step := range wd.Workflow {
+		switch step.Action {
+		case "merge", "merge-pr", "merge-mr", "rebase", "rebase-pr", "rebase-mr":
+			t.Errorf("feature pipeline must not contain merge or rebase action: step %q uses %q", step.ID, step.Action)
+		}
+		if step.ID == "rebase" || step.ID == "conflict-resolve" || step.ID == "merge" {
+			t.Errorf("feature pipeline must not contain unsafe step %q", step.ID)
+		}
+	}
+
+	steps := make(map[string]WorkflowStep, len(wd.Workflow))
+	for _, step := range wd.Workflow {
+		steps[step.ID] = step
+	}
+
+	notify, ok := steps["notify-ready"]
+	if !ok {
+		t.Fatal("feature pipeline must notify maintainers")
+	}
+	if notify.Type != "bridge" || notify.Action != "comment" || notify.Inputs["repo"] != "alcove-ai/alcove" || notify.Inputs["pr"] != "{{steps.create-pr.outputs.pr_number}}" || fmt.Sprint(notify.Inputs["body"]) == "" {
+		t.Errorf("notify-ready must comment on the created PR, got action=%q inputs=%v", notify.Action, notify.Inputs)
+	}
+	if notify.Depends != "code-review.Succeeded && security-review.Succeeded" {
+		t.Errorf("notify-ready must depend on both reviewers, got %q", notify.Depends)
+	}
+
+	label, ok := steps["label-ready"]
+	if !ok {
+		t.Fatal("feature pipeline must escalate the originating issue")
+	}
+	if label.Type != "bridge" || label.Action != "update-issue" || label.Inputs["repo"] != "alcove-ai/alcove" || label.Inputs["issue"] != "{{trigger.issue_number}}" {
+		t.Errorf("label-ready must label the originating issue, got action=%q inputs=%v", label.Action, label.Inputs)
+	}
+	if !reflect.DeepEqual(label.Inputs["add_labels"], []interface{}{"needs-human-review"}) {
+		t.Errorf("label-ready must add needs-human-review, got %q", label.Inputs["add_labels"])
+	}
+	if label.Depends != "code-review.Succeeded && security-review.Succeeded" {
+		t.Errorf("label-ready must depend on both reviewers, got %q", label.Depends)
+	}
+
+	awaitCI, ok := steps["await-ci"]
+	if !ok || awaitCI.Depends != "create-pr.Succeeded || ci-fix.Succeeded" {
+		t.Errorf("await-ci must only depend on create-pr and ci-fix, got %q", awaitCI.Depends)
+	}
+}
+
 func TestValidateConditionSyntax_Enhanced(t *testing.T) {
 	tests := []struct {
 		condition string
@@ -1408,7 +1468,6 @@ func TestValidateOutputContract(t *testing.T) {
 		})
 	}
 }
-
 
 func TestParseWorkflowDefinition_OutputContractWithRetry(t *testing.T) {
 	yamlData := `
