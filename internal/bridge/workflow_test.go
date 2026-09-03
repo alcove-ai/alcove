@@ -1045,6 +1045,12 @@ func TestSDLCv2RequiresHumanMerge(t *testing.T) {
 			t.Errorf("SDLC v2 must not contain unsafe step %q", step.ID)
 		}
 	}
+	for _, id := range []string{"implement", "ci-fix", "code-review", "security-review", "revision"} {
+		context, ok := steps[id].Inputs["task_context"]
+		if !ok || !strings.Contains(fmt.Sprint(context), "clear, brief, lean, and direct") || !strings.Contains(fmt.Sprint(context), "Do not merge PRs") {
+			t.Errorf("SDLC v2 step %q must include concise, no-merge communication policy", id)
+		}
+	}
 
 	notify, ok := steps["notify-ready"]
 	if !ok {

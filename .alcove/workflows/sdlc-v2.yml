@@ -29,6 +29,8 @@ workflow:
       issue_title: "{{trigger.issue_title}}"
       issue_body: "{{trigger.issue_body}}"
       issue_url: "{{trigger.issue_url}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
     outputs: [summary]
 
   - id: create-pr
@@ -71,6 +73,8 @@ workflow:
       issue_body: "{{trigger.issue_body}}"
       issue_url: "{{trigger.issue_url}}"
       ci_logs: "{{steps.await-ci.outputs.failure_logs}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
     outputs: [summary]
 
   - id: code-review
@@ -80,6 +84,8 @@ workflow:
     max_iterations: 3
     inputs:
       pr: "{{steps.create-pr.outputs.pr_number}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
     outputs: [approved, comments]
     output_contract:
       required: [approved, comments]
@@ -95,6 +101,8 @@ workflow:
     max_iterations: 3
     inputs:
       pr: "{{steps.create-pr.outputs.pr_number}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
     outputs: [approved, comments]
     output_contract:
       required: [approved, comments]
@@ -117,6 +125,8 @@ workflow:
       issue_url: "{{trigger.issue_url}}"
       code_feedback: "{{steps.code-review.outputs.comments}}"
       security_feedback: "{{steps.security-review.outputs.comments}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
     outputs: [summary]
 
   - id: notify-ready
