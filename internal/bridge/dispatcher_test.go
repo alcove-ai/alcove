@@ -201,3 +201,159 @@ func TestReconcileOutcomeLogic(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateMCPRequest_Valid verifies that a known server and plugin passes validation.
+func TestValidateMCPRequest_Valid(t *testing.T) {
+	servers := map[string]MCPServerConfig{
+		"my-mcp": {
+			Image: "quay.io/mcp/server:latest",
+			AllowedPlugins: map[string]MCPPluginConfig{
+				"browser": {Tools: []string{"browser.click", "browser.navigate"}},
+				"fs":      {Tools: []string{"fs.read"}},
+			},
+		},
+	}
+	cfg, err := validateMCPRequest("my-mcp", []string{"browser"}, servers)
+	if err != nil {
+		t.Fatalf("validateMCPRequest() unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("validateMCPRequest() returned nil config")
+	}
+	if cfg.Image != "quay.io/mcp/server:latest" {
+		t.Errorf("image = %q, want %q", cfg.Image, "quay.io/mcp/server:latest")
+	}
+}
+
+// TestValidateMCPRequest_UnknownServer verifies that an unknown server returns an error.
+func TestValidateMCPRequest_UnknownServer(t *testing.T) {
+	servers := map[string]MCPServerConfig{
+		"known": {Image: "img:latest"},
+	}
+	_, err := validateMCPRequest("unknown-server", nil, servers)
+	if err == nil {
+		t.Fatal("validateMCPRequest() expected error for unknown server")
+	}
+	if !strings.Contains(err.Error(), "unknown-server") {
+		t.Errorf("error should mention server name: %v", err)
+	}
+	if !strings.Contains(err.Error(), "known") {
+		t.Errorf("error should mention available servers: %v", err)
+	}
+}
+
+// TestValidateMCPRequest_DisallowedPlugin verifies that a non-allowed plugin returns an error.
+func TestValidateMCPRequest_DisallowedPlugin(t *testing.T) {
+	servers := map[string]MCPServerConfig{
+		"my-mcp": {
+			Image:          "img:latest",
+			AllowedPlugins: map[string]MCPPluginConfig{"browser": {}},
+		},
+	}
+	_, err := validateMCPRequest("my-mcp", []string{"filesystem"}, servers)
+	if err == nil {
+		t.Fatal("validateMCPRequest() expected error for disallowed plugin")
+	}
+	if !strings.Contains(err.Error(), "filesystem") {
+		t.Errorf("error should mention disallowed plugin: %v", err)
+	}
+	if !strings.Contains(err.Error(), "browser") {
+		t.Errorf("error should mention allowed plugins: %v", err)
+	}
+}
+
+// TestValidateMCPRequest_EmptyImage verifies that a server with no image returns an error.
+func TestValidateMCPRequest_EmptyImage(t *testing.T) {
+	servers := map[string]MCPServerConfig{
+		"no-image": {
+			Image: "", // missing
+		},
+	}
+	_, err := validateMCPRequest("no-image", nil, servers)
+	if err == nil {
+		t.Fatal("validateMCPRequest() expected error for empty image")
+	}
+	if !strings.Contains(err.Error(), "no image") {
+		t.Errorf("error should mention missing image: %v", err)
+	}
+}
+
+// TestValidateMCPRequest_NoMCPServer verifies that empty server returns nil (no-op).
+func TestValidateMCPRequest_NoMCPServer(t *testing.T) {
+	cfg, err := validateMCPRequest("", nil, nil)
+	if err != nil {
+		t.Fatalf("validateMCPRequest() empty server should return nil, nil: %v", err)
+	}
+	if cfg != nil {
+		t.Errorf("validateMCPRequest() empty server should return nil config, got %+v", cfg)
+	}
+}
+
+// TestBuildMCPToolFilter_AllTools verifies that when no step tools are specified,
+// all tools from the requested plugins are included.
+func TestBuildMCPToolFilter_AllTools(t *testing.T) {
+	allowedPlugins := map[string]MCPPluginConfig{
+		"browser": {Tools: []string{"browser.click", "browser.navigate"}},
+		"fs":      {Tools: []string{"fs.read", "fs.write"}},
+	}
+	// Request both plugins, no step-level filter.
+	filter, err := buildMCPToolFilter([]string{"browser", "fs"}, allowedPlugins, nil)
+	if err != nil {
+		t.Fatalf("buildMCPToolFilter() error: %v", err)
+	}
+	if filter == "" {
+		t.Fatal("buildMCPToolFilter() returned empty filter, expected non-empty")
+	}
+	// Verify all 4 tools are in the filter.
+	for _, tool := range []string{"browser.click", "browser.navigate", "fs.read", "fs.write"} {
+		if !strings.Contains(filter, tool) {
+			t.Errorf("tool %q missing from filter: %s", tool, filter)
+		}
+	}
+}
+
+// TestBuildMCPToolFilter_WithStepRestriction verifies intersection with MatchMCPTool.
+func TestBuildMCPToolFilter_WithStepRestriction(t *testing.T) {
+	allowedPlugins := map[string]MCPPluginConfig{
+		"browser": {Tools: []string{"browser.click", "browser.navigate"}},
+		"fs":      {Tools: []string{"fs.read", "fs.write"}},
+	}
+	// Step only allows browser.* tools.
+	filter, err := buildMCPToolFilter([]string{"browser", "fs"}, allowedPlugins, []string{"browser.*"})
+	if err != nil {
+		t.Fatalf("buildMCPToolFilter() error: %v", err)
+	}
+	if filter == "" {
+		t.Fatal("buildMCPToolFilter() returned empty filter")
+	}
+	if !strings.Contains(filter, "browser.click") {
+		t.Errorf("browser.click should be in filter: %s", filter)
+	}
+	if !strings.Contains(filter, "browser.navigate") {
+		t.Errorf("browser.navigate should be in filter: %s", filter)
+	}
+	// fs tools should be excluded by the step restriction.
+	if strings.Contains(filter, "fs.read") {
+		t.Errorf("fs.read must be excluded by step restriction: %s", filter)
+	}
+	if strings.Contains(filter, "fs.write") {
+		t.Errorf("fs.write must be excluded by step restriction: %s", filter)
+	}
+}
+
+// TestBuildMCPServerURL_Kubernetes verifies the MCP URL format on Kubernetes.
+func TestBuildMCPServerURL_Kubernetes(t *testing.T) {
+	url := buildMCPServerURL("kubernetes", "task-abc123")
+	if url != "http://localhost:3000" {
+		t.Errorf("buildMCPServerURL(kubernetes) = %q, want %q", url, "http://localhost:3000")
+	}
+}
+
+// TestBuildMCPServerURL_Podman verifies the MCP URL format on Podman.
+func TestBuildMCPServerURL_Podman(t *testing.T) {
+	url := buildMCPServerURL("podman", "task-abc123")
+	want := "http://mcp-task-abc123:3000"
+	if url != want {
+		t.Errorf("buildMCPServerURL(podman, task-abc123) = %q, want %q", url, want)
+	}
+}

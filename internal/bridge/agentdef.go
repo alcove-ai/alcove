@@ -73,8 +73,8 @@ type AgentDefinition struct {
 	EnforcementMode string                  `json:"enforcement_mode,omitempty" yaml:"enforcement_mode"`
 	DevContainer    *DevContainerSpec       `json:"dev_container,omitempty" yaml:"dev_container"`
 	// MCPServer names an operator-configured MCP server (from mcp.servers in alcove.yaml)
-	// to attach to this agent's session.
-	// TODO(Issue B): dispatcher wires MCPServer → MCP_SERVER_URL env var.
+	// to attach to this agent's session. The dispatcher resolves this to MCP_SERVER_URL
+	// via the MCPServers config lookup, then starts the MCP server sidecar.
 	MCPServer  string   `json:"mcp_server,omitempty" yaml:"mcp_server"`
 	// MCPPlugins lists the plugins to expose from the MCP server; only valid when MCPServer is set.
 	MCPPlugins []string `json:"mcp_plugins,omitempty" yaml:"mcp_plugins"`

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -1265,5 +1266,206 @@ func assertSecurityContext(t *testing.T, sc *corev1.SecurityContext, containerNa
 	}
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("%s: capabilities.drop should be [ALL], got %v", containerName, sc.Capabilities)
+	}
+}
+
+// TestRunTask_WithMCPServer_K8s verifies the MCP sidecar init container ordering:
+// [gate (mcp) dev] with all three present.
+func TestRunTask_WithMCPServer_K8s(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+
+	spec := TaskSpec{
+		TaskID:            "task-k8s-mcp",
+		Image:             "skiff:latest",
+		GateImage:         "gate:latest",
+		MCPServerImage:    "mcp-server:latest",
+		MCPServerEnv:      map[string]string{"MCP_CONFIG": "val"},
+		MCPServerName:     "test-mcp",
+		DevContainerImage: "dev:latest",
+		DevContainerEnv:   map[string]string{"SHIM_TOKEN": "tok"},
+	}
+
+	_, err := rt.RunTask(ctx, spec)
+	if err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+
+	jobs, _ := clientset.BatchV1().Jobs("test-ns").List(ctx, metav1.ListOptions{})
+	if len(jobs.Items) == 0 {
+		t.Fatal("no jobs created")
+	}
+	job := jobs.Items[0]
+	initContainers := job.Spec.Template.Spec.InitContainers
+
+	// With gate + mcp + dev, should have 3 init containers.
+	if len(initContainers) != 3 {
+		t.Fatalf("expected 3 init containers (gate, mcp, dev), got %d", len(initContainers))
+	}
+
+	// Verify ordering: gate first, mcp second, dev third.
+	if initContainers[0].Name != "gate" {
+		t.Errorf("init container[0] = %q, want %q", initContainers[0].Name, "gate")
+	}
+	if initContainers[1].Name != "mcp" {
+		t.Errorf("init container[1] = %q, want %q", initContainers[1].Name, "mcp")
+	}
+	if initContainers[2].Name != "dev" {
+		t.Errorf("init container[2] = %q, want %q", initContainers[2].Name, "dev")
+	}
+
+	mcp := initContainers[1]
+
+	// Verify MCP image.
+	if mcp.Image != "mcp-server:latest" {
+		t.Errorf("mcp image = %q, want %q", mcp.Image, "mcp-server:latest")
+	}
+
+	// Verify MCP restartPolicy is Always (native sidecar).
+	if mcp.RestartPolicy == nil || *mcp.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Errorf("mcp restartPolicy should be Always")
+	}
+
+	// Verify MCP env vars.
+	mcpEnvMap := envVarsToMap(mcp.Env)
+	if mcpEnvMap["MCP_CONFIG"] != "val" {
+		t.Errorf("mcp MCP_CONFIG = %q, want %q", mcpEnvMap["MCP_CONFIG"], "val")
+	}
+
+	// Verify MCP port.
+	found3000 := false
+	for _, port := range mcp.Ports {
+		if port.ContainerPort == 3000 {
+			found3000 = true
+		}
+	}
+	if !found3000 {
+		t.Errorf("mcp container missing port 3000, got ports: %v", mcp.Ports)
+	}
+
+	// Verify readiness probe.
+	if mcp.ReadinessProbe == nil {
+		t.Fatal("mcp readiness probe is nil")
+	}
+	if mcp.ReadinessProbe.TCPSocket == nil {
+		t.Fatal("mcp readiness probe TCPSocket is nil")
+	}
+	if mcp.ReadinessProbe.TCPSocket.Port.IntValue() != 3000 {
+		t.Errorf("mcp readiness probe port = %d, want 3000", mcp.ReadinessProbe.TCPSocket.Port.IntValue())
+	}
+	if mcp.ReadinessProbe.PeriodSeconds != 2 {
+		t.Errorf("mcp readiness probe period = %d, want 2", mcp.ReadinessProbe.PeriodSeconds)
+	}
+	if mcp.ReadinessProbe.FailureThreshold != 15 {
+		t.Errorf("mcp readiness probe failure threshold = %d, want 15", mcp.ReadinessProbe.FailureThreshold)
+	}
+
+	// Verify security context matches gate and dev.
+	assertSecurityContext(t, mcp.SecurityContext, "mcp")
+
+	// Verify resource limits are set.
+	if mcp.Resources.Requests == nil {
+		t.Fatal("mcp resource requests are nil")
+	}
+	if mcp.Resources.Limits == nil {
+		t.Fatal("mcp resource limits are nil")
+	}
+}
+
+// TestRunTask_WithMCPServer_NoDevContainer_K8s verifies 2 init containers
+// when there is an MCP server but no dev container.
+func TestRunTask_WithMCPServer_NoDevContainer_K8s(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+
+	spec := TaskSpec{
+		TaskID:         "task-k8s-mcp-nodc",
+		Image:          "skiff:latest",
+		GateImage:      "gate:latest",
+		MCPServerImage: "mcp-server:latest",
+		// No DevContainerImage.
+	}
+
+	_, err := rt.RunTask(ctx, spec)
+	if err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+
+	jobs, _ := clientset.BatchV1().Jobs("test-ns").List(ctx, metav1.ListOptions{})
+	job := jobs.Items[0]
+	initContainers := job.Spec.Template.Spec.InitContainers
+
+	// Should have 2 init containers: gate + mcp.
+	if len(initContainers) != 2 {
+		t.Fatalf("expected 2 init containers (gate, mcp), got %d", len(initContainers))
+	}
+	if initContainers[0].Name != "gate" {
+		t.Errorf("init container[0] = %q, want %q", initContainers[0].Name, "gate")
+	}
+	if initContainers[1].Name != "mcp" {
+		t.Errorf("init container[1] = %q, want %q", initContainers[1].Name, "mcp")
+	}
+}
+
+// TestRunTask_NoMCPServer_K8s verifies the existing init container count
+// is unchanged when no MCP server is configured.
+func TestRunTask_NoMCPServer_K8s(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+
+	spec := TaskSpec{
+		TaskID:    "task-k8s-nomcp",
+		Image:     "skiff:latest",
+		GateImage: "gate:latest",
+		// No MCPServerImage.
+	}
+
+	_, err := rt.RunTask(ctx, spec)
+	if err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+
+	jobs, _ := clientset.BatchV1().Jobs("test-ns").List(ctx, metav1.ListOptions{})
+	job := jobs.Items[0]
+	initContainers := job.Spec.Template.Spec.InitContainers
+
+	// Should have exactly 1 init container: gate only.
+	if len(initContainers) != 1 {
+		t.Fatalf("expected 1 init container (gate only), got %d", len(initContainers))
+	}
+	if initContainers[0].Name != "gate" {
+		t.Errorf("init container[0] = %q, want %q", initContainers[0].Name, "gate")
+	}
+
+	// Verify no MCP container in init containers.
+	for _, ic := range initContainers {
+		if ic.Name == "mcp" {
+			t.Errorf("found unexpected mcp init container in non-MCP session")
+		}
+	}
+}
+
+// TestRunTask_MCPServer_InvalidResource_K8s verifies that invalid resource
+// quantity strings return an error instead of panicking.
+func TestRunTask_MCPServer_InvalidResource_K8s(t *testing.T) {
+	rt, _ := newTestKubernetesRuntime()
+	ctx := context.Background()
+
+	spec := TaskSpec{
+		TaskID:         "task-k8s-mcp-badres",
+		Image:          "skiff:latest",
+		GateImage:      "gate:latest",
+		MCPServerImage: "mcp-server:latest",
+		MCPResourceLimits: MCPResourceLimits{
+			CPURequest: "not-a-valid-quantity",
+		},
+	}
+
+	_, err := rt.RunTask(ctx, spec)
+	if err == nil {
+		t.Fatal("RunTask() expected error for invalid resource quantity, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid MCP CPU request") {
+		t.Errorf("expected 'invalid MCP CPU request' in error, got: %v", err)
 	}
 }
