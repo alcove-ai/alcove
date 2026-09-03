@@ -33,10 +33,49 @@ workflow:
         SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
     outputs: [summary]
 
+  - id: pre-pr-verify
+    type: agent
+    agent: Branch Verifier
+    depends: "implement.Succeeded || pre-pr-revision.Succeeded"
+    max_iterations: 3
+    inputs:
+      branch: "{{steps.implement.inputs.branch}}"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not edit, commit, push, create PRs, comment, label, approve, or merge.
+    outputs: [verdict, findings, test_summary]
+    output_contract:
+      required: [verdict, findings, test_summary]
+      allowed_values:
+        verdict: ["pass", "revise"]
+      routing_field: verdict
+      success_value: "pass"
+
+  - id: pre-pr-revision
+    type: agent
+    agent: Autonomous Developer
+    depends: "pre-pr-verify.Failed"
+    max_iterations: 2
+    inputs:
+      branch: "{{steps.implement.inputs.branch}}"
+      issue_number: "{{trigger.issue_number}}"
+      repo: "alcove-ai/alcove"
+      issue_title: "{{trigger.issue_title}}"
+      issue_body: "{{trigger.issue_body}}"
+      issue_url: "{{trigger.issue_url}}"
+      verification_feedback: "{{steps.pre-pr-verify.outputs.findings}}"
+      task_context: |
+        SDLC v2 communication policy: be clear, brief, lean, and direct. State conclusions first. Use plain language and short sections. Prefer bullets over paragraphs. Remove filler and repetition without losing technical details, risks, or caveats. Do not merge PRs or invoke merge APIs.
+    outputs: [summary]
+
   - id: create-pr
     type: bridge
     action: create-merge-request
-    depends: "implement.Succeeded"
+    depends: "pre-pr-verify.Succeeded"
     inputs:
       repo: alcove-ai/alcove
       branch: "{{steps.implement.inputs.branch}}"

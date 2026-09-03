@@ -1051,6 +1051,19 @@ func TestSDLCv2RequiresHumanMerge(t *testing.T) {
 			t.Errorf("SDLC v2 step %q must include concise, no-merge communication policy", id)
 		}
 	}
+	verify, ok := steps["pre-pr-verify"]
+	if !ok || verify.Agent != "Branch Verifier" || verify.Depends != "implement.Succeeded || pre-pr-revision.Succeeded" {
+		t.Errorf("SDLC v2 must verify the branch before PR creation, got %+v", verify)
+	}
+	if verify.MaxIterations != 3 || verify.OutputContract == nil || verify.OutputContract.SuccessValue != "pass" {
+		t.Errorf("pre-pr-verify must have bounded pass/revise contract, got %+v", verify.OutputContract)
+	}
+	if revision, ok := steps["pre-pr-revision"]; !ok || revision.Agent != "Autonomous Developer" || revision.Depends != "pre-pr-verify.Failed" {
+		t.Errorf("SDLC v2 must provide bounded pre-PR revision, got %+v", revision)
+	}
+	if createPR, ok := steps["create-pr"]; !ok || createPR.Depends != "pre-pr-verify.Succeeded" {
+		t.Errorf("create-pr must depend on pre-pr verification, got %+v", createPR)
+	}
 
 	notify, ok := steps["notify-ready"]
 	if !ok {
