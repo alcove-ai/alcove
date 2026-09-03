@@ -46,6 +46,7 @@ var templateFS embed.FS
 // API holds the HTTP handlers for the Bridge REST API.
 type API struct {
 	dispatcher       *Dispatcher
+	eventDispatcher  eventTaskDispatcher
 	db               *pgxpool.Pool
 	cfg              *Config
 	scheduler        *Scheduler
@@ -67,6 +68,7 @@ type API struct {
 func NewAPI(dispatcher *Dispatcher, db *pgxpool.Pool, cfg *Config, scheduler *Scheduler, credStore *CredentialStore, toolStore *ToolStore, profileStore *ProfileStore, settingsStore *SettingsStore, llm *BridgeLLM, defStore *AgentDefStore, syncer *AgentRepoSyncer, authStore auth.Authenticator, workflowEngine *WorkflowEngine, teamStore *TeamStore, repoGroupStore *RepoGroupStore) *API {
 	return &API{
 		dispatcher:       dispatcher,
+		eventDispatcher:  dispatcher,
 		db:               db,
 		cfg:              cfg,
 		scheduler:        scheduler,
@@ -2215,7 +2217,7 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 			// ref is like "refs/heads/main"
 			branch = strings.TrimPrefix(ref, "refs/heads/")
 		}
-	case "pull_request":
+	case "pull_request", "pull_request_review", "pull_request_review_comment":
 		if pr, ok := payload["pull_request"].(map[string]any); ok {
 			if head, ok := pr["head"].(map[string]any); ok {
 				branch, _ = head["ref"].(string)
@@ -2290,7 +2292,9 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 					sha = s
 				}
 			}
-			if num, ok := pr["number"].(float64); ok {
+			if num, ok := payload["number"].(float64); ok {
+				prNumber = fmt.Sprintf("%d", int(num))
+			} else if num, ok := pr["number"].(float64); ok {
 				prNumber = fmt.Sprintf("%d", int(num))
 			}
 		}
@@ -2439,7 +2443,11 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 			log.Printf("webhook: dispatched workflow %s for %s %s/%s", sched.Name, eventType, repo, action)
 		} else {
 
-			session, err := a.dispatcher.DispatchTask(ctx, taskReq, "webhook", sched.TeamID)
+			dispatcher := a.eventDispatcher
+			if dispatcher == nil {
+				dispatcher = a.dispatcher
+			}
+			session, err := dispatcher.DispatchTask(ctx, taskReq, "webhook", sched.TeamID)
 			if err != nil {
 				log.Printf("webhook: error dispatching schedule %s (%s): %v", sched.Name, sched.ID, err)
 				continue

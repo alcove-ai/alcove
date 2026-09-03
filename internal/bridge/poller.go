@@ -52,11 +52,15 @@ var githubEventTypeMap = map[string]string{
 // polling-mode event schedules and dispatches matching tasks.
 type GitHubPoller struct {
 	db             *pgxpool.Pool
-	dispatcher     *Dispatcher
+	dispatcher     eventTaskDispatcher
 	credStore      *CredentialStore
 	defStore       *AgentDefStore
 	workflowEngine *WorkflowEngine
 	client         *http.Client
+}
+
+type eventTaskDispatcher interface {
+	DispatchTask(context.Context, TaskRequest, string, ...string) (*internal.Session, error)
 }
 
 // pollSchedule holds the fields needed from a schedule for polling and dispatch.
