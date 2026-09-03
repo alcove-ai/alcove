@@ -102,7 +102,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/security-profiles/", a.handleSecurityProfileByID)
 	mux.HandleFunc("/api/v1/internal/token-refresh", a.handleTokenRefresh)
 	mux.HandleFunc("/api/v1/admin/settings/llm", a.handleAdminSettingsLLM)
-mux.HandleFunc("/api/v1/user/settings/agent-repos", a.handleUserSettingsAgentRepos)
+	mux.HandleFunc("/api/v1/user/settings/agent-repos", a.handleUserSettingsAgentRepos)
 	mux.HandleFunc("/api/v1/agent-repos/validate", a.handleAgentRepoValidate)
 	mux.HandleFunc("/api/v1/agent-definitions", a.handleAgentDefinitions)
 	mux.HandleFunc("/api/v1/agent-definitions/sync", a.handleAgentDefinitionsSync)
@@ -1869,7 +1869,7 @@ func (a *API) handleAgentDefinitions(w http.ResponseWriter, r *http.Request) {
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"agent_definitions": defs,
-		"count":            len(defs),
+		"count":             len(defs),
 	})
 }
 
@@ -2090,7 +2090,6 @@ func (a *API) getTeamCredentialProviders(ctx context.Context, teamID string) (ma
 	return providers, rows.Err()
 }
 
-
 // --- Agent Templates ---
 
 func (a *API) handleAgentTemplates(w http.ResponseWriter, r *http.Request) {
@@ -2273,14 +2272,7 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 	// pull_request, pull_request_review (reviewer), and
 	// pull_request_review_comment (inline commenter). Falls back to nil slice
 	// if sender is not present.
-	var users []string
-	if sender, ok := payload["sender"].(map[string]any); ok {
-		if login, ok := sender["login"].(string); ok {
-			if login = strings.TrimSpace(login); login != "" {
-				users = []string{login}
-			}
-		}
-	}
+	users := githubWebhookActors(payload)
 
 	// Extract additional info for dispatched tasks.
 	sha := ""
@@ -2447,28 +2439,28 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 			log.Printf("webhook: dispatched workflow %s for %s %s/%s", sched.Name, eventType, repo, action)
 		} else {
 
-		session, err := a.dispatcher.DispatchTask(ctx, taskReq, "webhook", sched.TeamID)
-		if err != nil {
-			log.Printf("webhook: error dispatching schedule %s (%s): %v", sched.Name, sched.ID, err)
-			continue
-		}
+			session, err := a.dispatcher.DispatchTask(ctx, taskReq, "webhook", sched.TeamID)
+			if err != nil {
+				log.Printf("webhook: error dispatching schedule %s (%s): %v", sched.Name, sched.ID, err)
+				continue
+			}
 
-		// Store webhook context as metadata on the session.
-		webhookMeta := map[string]string{
-			"GITHUB_EVENT":        eventType,
-			"GITHUB_REPO":         repo,
-			"GITHUB_REF":          branch,
-			"GITHUB_SHA":          sha,
-			"GITHUB_PR_NUMBER":    prNumber,
-			"GITHUB_ISSUE_NUMBER": issueNumber,
-		}
-		metaJSON, _ := json.Marshal(webhookMeta)
-		_, _ = a.db.Exec(ctx,
-			`UPDATE sessions SET prompt = prompt || E'\n\n[webhook: ' || $1 || ']' WHERE id = $2`,
-			string(metaJSON), session.ID)
+			// Store webhook context as metadata on the session.
+			webhookMeta := map[string]string{
+				"GITHUB_EVENT":        eventType,
+				"GITHUB_REPO":         repo,
+				"GITHUB_REF":          branch,
+				"GITHUB_SHA":          sha,
+				"GITHUB_PR_NUMBER":    prNumber,
+				"GITHUB_ISSUE_NUMBER": issueNumber,
+			}
+			metaJSON, _ := json.Marshal(webhookMeta)
+			_, _ = a.db.Exec(ctx,
+				`UPDATE sessions SET prompt = prompt || E'\n\n[webhook: ' || $1 || ']' WHERE id = $2`,
+				string(metaJSON), session.ID)
 
-		dispatched++
-		log.Printf("webhook: dispatched schedule %s (%s) for %s %s/%s", sched.Name, sched.ID, eventType, repo, action)
+			dispatched++
+			log.Printf("webhook: dispatched schedule %s (%s) for %s %s/%s", sched.Name, sched.ID, eventType, repo, action)
 		}
 	}
 
@@ -2478,6 +2470,18 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 		matched, deliveryID)
 
 	respondJSON(w, http.StatusOK, map[string]any{"matched": matched, "dispatched": dispatched})
+}
+
+func githubWebhookActors(payload map[string]any) []string {
+	sender, ok := payload["sender"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	login, ok := sender["login"].(string)
+	if !ok {
+		return nil
+	}
+	return githubEventActors(login)
 }
 
 // --- Admin Settings: System State ---

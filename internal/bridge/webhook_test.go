@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -478,11 +479,11 @@ func TestGitLabTriggerMatches(t *testing.T) {
 
 func TestGitHubTriggerExcludeUsers(t *testing.T) {
 	tests := []struct {
-		name         string
-		trigger      *GitHubTrigger
-		eventType    string
-		users        []string
-		want         bool
+		name      string
+		trigger   *GitHubTrigger
+		eventType string
+		users     []string
+		want      bool
 	}{
 		{
 			name:      "excluded user is blocked",
@@ -570,18 +571,25 @@ func TestGitHubTriggerExcludeUsers(t *testing.T) {
 			want:      true,
 		},
 		{
-			name:      "event with nil users and non-empty ExcludeUsers — passes (nothing to exclude)",
-			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			name:      "whitespace is trimmed for Users allowlist",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, Users: []string{" decko "}},
 			eventType: "issue_comment",
-			users:     nil,
+			users:     []string{" decko "},
 			want:      true,
 		},
 		{
-			name:      "event with empty users and non-empty ExcludeUsers — passes (nothing to exclude)",
+			name:      "event with nil users and non-empty ExcludeUsers — fails closed",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			eventType: "issue_comment",
+			users:     nil,
+			want:      false,
+		},
+		{
+			name:      "event with empty users and non-empty ExcludeUsers — fails closed",
 			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
 			eventType: "issue_comment",
 			users:     []string{},
-			want:      true,
+			want:      false,
 		},
 	}
 
@@ -592,6 +600,35 @@ func TestGitHubTriggerExcludeUsers(t *testing.T) {
 				t.Errorf("Matches(%q, users=%v) = %v, want %v", tt.eventType, tt.users, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGitHubEventActors(t *testing.T) {
+	for _, eventType := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment"} {
+		t.Run(eventType, func(t *testing.T) {
+			if got := githubEventActors(" alcove-bot "); !reflect.DeepEqual(got, []string{"alcove-bot"}) {
+				t.Fatalf("githubEventActors() = %v, want [alcove-bot]", got)
+			}
+		})
+	}
+	if got := githubEventActors("  "); got != nil {
+		t.Fatalf("githubEventActors(blank) = %v, want nil", got)
+	}
+}
+
+func TestGitHubWebhookActors(t *testing.T) {
+	for _, eventType := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment"} {
+		t.Run(eventType, func(t *testing.T) {
+			payload := map[string]any{
+				"sender": map[string]any{"login": " alcove-bot "},
+			}
+			if got := githubWebhookActors(payload); !reflect.DeepEqual(got, []string{"alcove-bot"}) {
+				t.Fatalf("githubWebhookActors() = %v, want [alcove-bot]", got)
+			}
+		})
+	}
+	if got := githubWebhookActors(map[string]any{}); got != nil {
+		t.Fatalf("githubWebhookActors(missing sender) = %v, want nil", got)
 	}
 }
 

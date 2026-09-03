@@ -827,7 +827,9 @@ of labels on the issue or PR.
 The `users` and `exclude_users` fields filter events by the **event actor** — the
 GitHub login that performed the action (`sender.login` for webhooks,
 `actor.login` for polling). Matching is case-insensitive; blank entries are
-ignored.
+ignored. If either field has an effective (nonblank) value and an event has no
+actor, the event is rejected. A list containing only blank entries is treated
+as unset.
 
 **`exclude_users` — blocklist (evaluated first)**
 

@@ -28,11 +28,11 @@ type EventTrigger struct {
 
 // GitLabTrigger defines GitLab webhook event matching criteria.
 type GitLabTrigger struct {
-	Events   []string `json:"events" yaml:"events"`                       // merge_request, issue, push, comment, pipeline
-	Actions  []string `json:"actions,omitempty" yaml:"actions"`           // opened, merged, labeled, closed, pushed
-	Projects []string `json:"projects,omitempty" yaml:"projects"`         // group/project filters (empty = all)
-	Branches []string `json:"branches,omitempty" yaml:"branches"`         // branch filters (empty = all)
-	Labels   []string `json:"labels,omitempty" yaml:"labels"`             // label filters (empty = all)
+	Events   []string `json:"events" yaml:"events"`               // merge_request, issue, push, comment, pipeline
+	Actions  []string `json:"actions,omitempty" yaml:"actions"`   // opened, merged, labeled, closed, pushed
+	Projects []string `json:"projects,omitempty" yaml:"projects"` // group/project filters (empty = all)
+	Branches []string `json:"branches,omitempty" yaml:"branches"` // branch filters (empty = all)
+	Labels   []string `json:"labels,omitempty" yaml:"labels"`     // label filters (empty = all)
 }
 
 // Matches checks if a GitLab event matches this trigger config.
@@ -85,7 +85,7 @@ func (t *GitLabTrigger) Matches(eventType, action, project, branch string, label
 }
 
 type JiraTrigger struct {
-	Projects   []string `json:"projects" yaml:"projects"`                       // JIRA project keys (e.g., "RHCLOUD", "AAP")
+	Projects   []string `json:"projects" yaml:"projects"`                         // JIRA project keys (e.g., "RHCLOUD", "AAP")
 	Components []string `json:"components,omitempty" yaml:"components,omitempty"` // component filters (empty = all)
 	Labels     []string `json:"labels,omitempty" yaml:"labels,omitempty"`         // label filters (empty = all)
 }
@@ -144,14 +144,14 @@ func (t *JiraTrigger) Matches(issueProject string, issueComponents, issueLabels 
 
 // GitHubTrigger defines GitHub webhook event matching criteria.
 type GitHubTrigger struct {
-	Events       []string `json:"events" yaml:"events"`                                           // push, pull_request, issue_comment, release
-	Actions      []string `json:"actions,omitempty" yaml:"actions"`                              // opened, synchronize, created, published
-	Repos        []string `json:"repos,omitempty" yaml:"repos"`                                  // org/repo filters (empty = all)
-	Branches     []string `json:"branches,omitempty" yaml:"branches"`                            // branch filters (empty = all)
-	Labels       []string `json:"labels,omitempty" yaml:"labels"`                                // label filters (empty = all)
-	Users        []string `json:"users,omitempty" yaml:"users"`                                  // event actor allowlist (empty = all)
-	ExcludeUsers []string `json:"exclude_users,omitempty" yaml:"exclude_users,omitempty"`        // event actor blocklist; evaluated before users, exclusion wins
-	DeliveryMode string   `json:"delivery_mode,omitempty" yaml:"delivery_mode"`                  // "polling" or "webhook", default "polling"
+	Events       []string `json:"events" yaml:"events"`                                   // push, pull_request, issue_comment, release
+	Actions      []string `json:"actions,omitempty" yaml:"actions"`                       // opened, synchronize, created, published
+	Repos        []string `json:"repos,omitempty" yaml:"repos"`                           // org/repo filters (empty = all)
+	Branches     []string `json:"branches,omitempty" yaml:"branches"`                     // branch filters (empty = all)
+	Labels       []string `json:"labels,omitempty" yaml:"labels"`                         // label filters (empty = all)
+	Users        []string `json:"users,omitempty" yaml:"users"`                           // event actor allowlist (empty = all)
+	ExcludeUsers []string `json:"exclude_users,omitempty" yaml:"exclude_users,omitempty"` // event actor blocklist; evaluated before users, exclusion wins
+	DeliveryMode string   `json:"delivery_mode,omitempty" yaml:"delivery_mode"`           // "polling" or "webhook", default "polling"
 }
 
 // Matches checks if an incoming webhook event matches this trigger config.
@@ -200,27 +200,27 @@ func (t *GitHubTrigger) Matches(eventType, action, repo, branch string, labels, 
 		}
 	}
 
-	// ExcludeUsers filter: if any excluded user matches the event actor, skip
-	// this event. Evaluated before the Users allowlist; exclusion wins when
-	// both lists match. Blank/whitespace entries are ignored.
-	for _, excluded := range t.ExcludeUsers {
-		excluded = strings.TrimSpace(excluded)
-		if excluded == "" {
-			continue
-		}
-		for _, have := range users {
-			if strings.EqualFold(excluded, strings.TrimSpace(have)) {
-				return false
-			}
+	configuredExclude := normalizedLogins(t.ExcludeUsers)
+	configuredUsers := normalizedLogins(t.Users)
+	observedUsers := normalizedLogins(users)
+
+	// When an actor filter is configured, an event without an actor must not
+	// bypass it. Exclusions are evaluated before the allowlist; exclusion wins.
+	if (len(configuredExclude) > 0 || len(configuredUsers) > 0) && len(observedUsers) == 0 {
+		return false
+	}
+	for _, excluded := range configuredExclude {
+		if stringInSlice(excluded, observedUsers) {
+			return false
 		}
 	}
 
 	// Users filter (AND with other filters). If trigger specifies users,
 	// at least one must match the event's user.
-	if len(t.Users) > 0 {
+	if len(configuredUsers) > 0 {
 		matched := false
-		for _, required := range t.Users {
-			for _, have := range users {
+		for _, required := range configuredUsers {
+			for _, have := range observedUsers {
 				if strings.EqualFold(required, have) {
 					matched = true
 					break
@@ -236,6 +236,23 @@ func (t *GitHubTrigger) Matches(eventType, action, repo, branch string, labels, 
 	}
 
 	return true
+}
+
+func normalizedLogins(logins []string) []string {
+	normalized := make([]string, 0, len(logins))
+	for _, login := range logins {
+		if login = strings.TrimSpace(login); login != "" {
+			normalized = append(normalized, login)
+		}
+	}
+	return normalized
+}
+
+func githubEventActors(login string) []string {
+	if login = strings.TrimSpace(login); login != "" {
+		return []string{login}
+	}
+	return nil
 }
 
 // stringInSlice checks if a string is present in a slice (case-insensitive).

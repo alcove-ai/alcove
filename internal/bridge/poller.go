@@ -178,12 +178,12 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, teamID string, schedu
 	// solely on the webhook_deliveries table for deduplication. No ID-based
 	// skipping — GitHub event IDs are not chronologically ordered.
 	type ghEvent struct {
-		ID        string                `json:"id"`
-		Type      string                `json:"type"`
+		ID        string                 `json:"id"`
+		Type      string                 `json:"type"`
 		Actor     struct{ Login string } `json:"actor"`
-		Repo      struct{ Name string } `json:"repo"`
-		Payload   json.RawMessage       `json:"payload"`
-		CreatedAt time.Time             `json:"created_at"`
+		Repo      struct{ Name string }  `json:"repo"`
+		Payload   json.RawMessage        `json:"payload"`
+		CreatedAt time.Time              `json:"created_at"`
 	}
 
 	var allEvents []ghEvent
@@ -396,10 +396,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, teamID string, schedu
 		// event types: IssuesEvent (labeler), IssueCommentEvent (commenter),
 		// PullRequestReviewEvent (reviewer), PullRequestReviewCommentEvent
 		// (inline commenter). Falls back to nil slice if actor is not present.
-		var users []string
-		if login := strings.TrimSpace(event.Actor.Login); login != "" {
-			users = []string{login}
-		}
+		users := githubEventActors(event.Actor.Login)
 
 		eventRepo := event.Repo.Name
 
