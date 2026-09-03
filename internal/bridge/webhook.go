@@ -144,13 +144,14 @@ func (t *JiraTrigger) Matches(issueProject string, issueComponents, issueLabels 
 
 // GitHubTrigger defines GitHub webhook event matching criteria.
 type GitHubTrigger struct {
-	Events       []string `json:"events" yaml:"events"`                              // push, pull_request, issue_comment, release
-	Actions      []string `json:"actions,omitempty" yaml:"actions"`                   // opened, synchronize, created, published
-	Repos        []string `json:"repos,omitempty" yaml:"repos"`                       // org/repo filters (empty = all)
-	Branches     []string `json:"branches,omitempty" yaml:"branches"`                 // branch filters (empty = all)
-	Labels       []string `json:"labels,omitempty" yaml:"labels"`                     // label filters (empty = all)
-	Users        []string `json:"users,omitempty" yaml:"users"`                       // user filters (empty = all)
-	DeliveryMode string   `json:"delivery_mode,omitempty" yaml:"delivery_mode"`       // "polling" or "webhook", default "polling"
+	Events       []string `json:"events" yaml:"events"`                                           // push, pull_request, issue_comment, release
+	Actions      []string `json:"actions,omitempty" yaml:"actions"`                              // opened, synchronize, created, published
+	Repos        []string `json:"repos,omitempty" yaml:"repos"`                                  // org/repo filters (empty = all)
+	Branches     []string `json:"branches,omitempty" yaml:"branches"`                            // branch filters (empty = all)
+	Labels       []string `json:"labels,omitempty" yaml:"labels"`                                // label filters (empty = all)
+	Users        []string `json:"users,omitempty" yaml:"users"`                                  // event actor allowlist (empty = all)
+	ExcludeUsers []string `json:"exclude_users,omitempty" yaml:"exclude_users,omitempty"`        // event actor blocklist; evaluated before users, exclusion wins
+	DeliveryMode string   `json:"delivery_mode,omitempty" yaml:"delivery_mode"`                  // "polling" or "webhook", default "polling"
 }
 
 // Matches checks if an incoming webhook event matches this trigger config.
@@ -196,6 +197,21 @@ func (t *GitHubTrigger) Matches(eventType, action, repo, branch string, labels, 
 		}
 		if !matched {
 			return false
+		}
+	}
+
+	// ExcludeUsers filter: if any excluded user matches the event actor, skip
+	// this event. Evaluated before the Users allowlist; exclusion wins when
+	// both lists match. Blank/whitespace entries are ignored.
+	for _, excluded := range t.ExcludeUsers {
+		excluded = strings.TrimSpace(excluded)
+		if excluded == "" {
+			continue
+		}
+		for _, have := range users {
+			if strings.EqualFold(excluded, strings.TrimSpace(have)) {
+				return false
+			}
 		}
 	}
 

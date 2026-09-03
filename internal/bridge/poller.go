@@ -180,6 +180,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, teamID string, schedu
 	type ghEvent struct {
 		ID        string                `json:"id"`
 		Type      string                `json:"type"`
+		Actor     struct{ Login string } `json:"actor"`
 		Repo      struct{ Name string } `json:"repo"`
 		Payload   json.RawMessage       `json:"payload"`
 		CreatedAt time.Time             `json:"created_at"`
@@ -390,26 +391,14 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, teamID string, schedu
 			}
 		}
 
-		// Extract user from comment, issue, or pull request.
+		// Extract the event actor from the top-level actor field.
+		// actor.login correctly identifies who performed the action for all
+		// event types: IssuesEvent (labeler), IssueCommentEvent (commenter),
+		// PullRequestReviewEvent (reviewer), PullRequestReviewCommentEvent
+		// (inline commenter). Falls back to nil slice if actor is not present.
 		var users []string
-		if comment, ok := payload["comment"].(map[string]interface{}); ok {
-			if user, ok := comment["user"].(map[string]interface{}); ok {
-				if login, ok := user["login"].(string); ok {
-					users = append(users, login)
-				}
-			}
-		} else if issue, ok := payload["issue"].(map[string]interface{}); ok {
-			if user, ok := issue["user"].(map[string]interface{}); ok {
-				if login, ok := user["login"].(string); ok {
-					users = append(users, login)
-				}
-			}
-		} else if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-			if user, ok := pr["user"].(map[string]interface{}); ok {
-				if login, ok := user["login"].(string); ok {
-					users = append(users, login)
-				}
-			}
+		if login := strings.TrimSpace(event.Actor.Login); login != "" {
+			users = []string{login}
 		}
 
 		eventRepo := event.Repo.Name

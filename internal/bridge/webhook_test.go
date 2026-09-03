@@ -14,7 +14,12 @@
 
 package bridge
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 func TestGitHubTriggerMatches(t *testing.T) {
 	tests := []struct {
@@ -468,5 +473,164 @@ func TestGitLabTriggerMatches(t *testing.T) {
 					tt.eventType, tt.action, tt.project, tt.branch, tt.labels, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGitHubTriggerExcludeUsers(t *testing.T) {
+	tests := []struct {
+		name         string
+		trigger      *GitHubTrigger
+		eventType    string
+		users        []string
+		want         bool
+	}{
+		{
+			name:      "excluded user is blocked",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			eventType: "issue_comment",
+			users:     []string{"alcove-bot"},
+			want:      false,
+		},
+		{
+			name:      "non-excluded user passes through",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			eventType: "issue_comment",
+			users:     []string{"decko"},
+			want:      true,
+		},
+		{
+			name:      "empty ExcludeUsers is a no-op",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{}},
+			eventType: "issue_comment",
+			users:     []string{"alcove-bot"},
+			want:      true,
+		},
+		{
+			name:      "nil ExcludeUsers is a no-op",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}},
+			eventType: "issue_comment",
+			users:     []string{"alcove-bot"},
+			want:      true,
+		},
+		{
+			name:      "case insensitive exclusion — Alcove-Bot vs alcove-bot",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"Alcove-Bot"}},
+			eventType: "issue_comment",
+			users:     []string{"alcove-bot"},
+			want:      false,
+		},
+		{
+			name:      "case insensitive exclusion — alcove-bot vs ALCOVE-BOT",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			eventType: "issue_comment",
+			users:     []string{"ALCOVE-BOT"},
+			want:      false,
+		},
+		{
+			name:      "multiple excluded users, one matches",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"bot-a", "alcove-bot"}},
+			eventType: "issue_comment",
+			users:     []string{"alcove-bot"},
+			want:      false,
+		},
+		{
+			name: "both Users and ExcludeUsers set — user in both — exclude wins",
+			trigger: &GitHubTrigger{
+				Events:       []string{"issue_comment"},
+				Users:        []string{"alcove-bot"},
+				ExcludeUsers: []string{"alcove-bot"},
+			},
+			eventType: "issue_comment",
+			users:     []string{"alcove-bot"},
+			want:      false,
+		},
+		{
+			name: "both Users and ExcludeUsers set — user only in Users — allowed",
+			trigger: &GitHubTrigger{
+				Events:       []string{"issue_comment"},
+				Users:        []string{"decko"},
+				ExcludeUsers: []string{"alcove-bot"},
+			},
+			eventType: "issue_comment",
+			users:     []string{"decko"},
+			want:      true,
+		},
+		{
+			name:      "blank entry in ExcludeUsers is ignored",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"", "  ", "alcove-bot"}},
+			eventType: "issue_comment",
+			users:     []string{"decko"},
+			want:      true,
+		},
+		{
+			name:      "blank entry in ExcludeUsers does not accidentally block non-blank user",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"  "}},
+			eventType: "issue_comment",
+			users:     []string{"decko"},
+			want:      true,
+		},
+		{
+			name:      "event with nil users and non-empty ExcludeUsers — passes (nothing to exclude)",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			eventType: "issue_comment",
+			users:     nil,
+			want:      true,
+		},
+		{
+			name:      "event with empty users and non-empty ExcludeUsers — passes (nothing to exclude)",
+			trigger:   &GitHubTrigger{Events: []string{"issue_comment"}, ExcludeUsers: []string{"alcove-bot"}},
+			eventType: "issue_comment",
+			users:     []string{},
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.trigger.Matches(tt.eventType, "", "", "", nil, tt.users)
+			if got != tt.want {
+				t.Errorf("Matches(%q, users=%v) = %v, want %v", tt.eventType, tt.users, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitHubTriggerExcludeUsersRoundTrip(t *testing.T) {
+	yamlInput := `
+github:
+  events: [issue_comment]
+  actions: [created]
+  repos: [alcove-ai/alcove]
+  delivery_mode: polling
+  exclude_users: [alcove-bot]
+`
+	// YAML → struct
+	var trigger EventTrigger
+	if err := yaml.Unmarshal([]byte(yamlInput), &trigger); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if trigger.GitHub == nil {
+		t.Fatal("expected trigger.GitHub to be non-nil")
+	}
+	if len(trigger.GitHub.ExcludeUsers) != 1 || trigger.GitHub.ExcludeUsers[0] != "alcove-bot" {
+		t.Errorf("after YAML unmarshal, ExcludeUsers = %v, want [alcove-bot]", trigger.GitHub.ExcludeUsers)
+	}
+
+	// struct → JSON
+	jsonBytes, err := json.Marshal(trigger)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	// JSON → struct
+	var roundTripped EventTrigger
+	if err := json.Unmarshal(jsonBytes, &roundTripped); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if roundTripped.GitHub == nil {
+		t.Fatal("expected roundTripped.GitHub to be non-nil after JSON round-trip")
+	}
+	if len(roundTripped.GitHub.ExcludeUsers) != 1 || roundTripped.GitHub.ExcludeUsers[0] != "alcove-bot" {
+		t.Errorf("after JSON round-trip, ExcludeUsers = %v, want [alcove-bot]", roundTripped.GitHub.ExcludeUsers)
 	}
 }

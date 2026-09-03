@@ -6,6 +6,7 @@ trigger:
     labels: [needs-planning]
     repos: [alcove-ai/alcove]
     delivery_mode: polling
+    exclude_users: [alcove-bot]   # prevent bot replies from re-triggering
 
 workflow:
   - id: plan

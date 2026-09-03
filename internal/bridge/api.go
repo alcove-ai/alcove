@@ -2267,18 +2267,17 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract user from comment or issue.
+	// Extract the event actor from the top-level sender field.
+	// sender.login correctly identifies who performed the action for all
+	// webhook event types: issues (labeler), issue_comment (commenter),
+	// pull_request, pull_request_review (reviewer), and
+	// pull_request_review_comment (inline commenter). Falls back to nil slice
+	// if sender is not present.
 	var users []string
-	if comment, ok := payload["comment"].(map[string]any); ok {
-		if user, ok := comment["user"].(map[string]any); ok {
-			if login, ok := user["login"].(string); ok {
-				users = append(users, login)
-			}
-		}
-	} else if issue, ok := payload["issue"].(map[string]any); ok {
-		if user, ok := issue["user"].(map[string]any); ok {
-			if login, ok := user["login"].(string); ok {
-				users = append(users, login)
+	if sender, ok := payload["sender"].(map[string]any); ok {
+		if login, ok := sender["login"].(string); ok {
+			if login = strings.TrimSpace(login); login != "" {
+				users = []string{login}
 			}
 		}
 	}
