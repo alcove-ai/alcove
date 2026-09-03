@@ -990,7 +990,7 @@ workflow:
 	}
 }
 
-func TestFeaturePipelineRequiresHumanMerge(t *testing.T) {
+func TestFeaturePipelineRetainsLegacyBehavior(t *testing.T) {
 	yamlData, err := os.ReadFile("../../.alcove/workflows/feature-pipeline.yml")
 	if err != nil {
 		t.Fatalf("read feature pipeline: %v", err)
@@ -1001,14 +1001,8 @@ func TestFeaturePipelineRequiresHumanMerge(t *testing.T) {
 		t.Fatalf("parse feature pipeline: %v", err)
 	}
 
-	for _, step := range wd.Workflow {
-		switch step.Action {
-		case "merge", "merge-pr", "merge-mr", "rebase", "rebase-pr", "rebase-mr":
-			t.Errorf("feature pipeline must not contain merge or rebase action: step %q uses %q", step.ID, step.Action)
-		}
-		if step.ID == "rebase" || step.ID == "conflict-resolve" || step.ID == "merge" {
-			t.Errorf("feature pipeline must not contain unsafe step %q", step.ID)
-		}
+	if trigger := wd.Trigger; trigger == nil || trigger.GitHub == nil || !reflect.DeepEqual(trigger.GitHub.Labels, []string{"ready-for-dev"}) {
+		t.Fatal("feature pipeline must retain ready-for-dev trigger")
 	}
 
 	steps := make(map[string]WorkflowStep, len(wd.Workflow))
@@ -1016,9 +1010,45 @@ func TestFeaturePipelineRequiresHumanMerge(t *testing.T) {
 		steps[step.ID] = step
 	}
 
+	for _, id := range []string{"rebase", "conflict-resolve", "merge"} {
+		if _, ok := steps[id]; !ok {
+			t.Errorf("legacy feature pipeline must retain step %q", id)
+		}
+	}
+	if steps["await-ci"].Depends != "create-pr.Succeeded || ci-fix.Succeeded || rebase.Succeeded || conflict-resolve.Succeeded" {
+		t.Errorf("legacy await-ci dependency changed: %q", steps["await-ci"].Depends)
+	}
+}
+
+func TestSDLCv2RequiresHumanMerge(t *testing.T) {
+	yamlData, err := os.ReadFile("../../.alcove/workflows/sdlc-v2.yml")
+	if err != nil {
+		t.Fatalf("read SDLC v2 pipeline: %v", err)
+	}
+
+	wd, err := ParseWorkflowDefinition(yamlData)
+	if err != nil {
+		t.Fatalf("parse SDLC v2 pipeline: %v", err)
+	}
+	if trigger := wd.Trigger; trigger == nil || trigger.GitHub == nil || !reflect.DeepEqual(trigger.GitHub.Labels, []string{"ready-for-sdlc-v2"}) {
+		t.Fatal("SDLC v2 must use ready-for-sdlc-v2 trigger")
+	}
+
+	steps := make(map[string]WorkflowStep, len(wd.Workflow))
+	for _, step := range wd.Workflow {
+		steps[step.ID] = step
+		switch step.Action {
+		case "merge", "merge-pr", "merge-mr", "rebase", "rebase-pr", "rebase-mr":
+			t.Errorf("SDLC v2 must not contain merge or rebase action: step %q uses %q", step.ID, step.Action)
+		}
+		if step.ID == "rebase" || step.ID == "conflict-resolve" || step.ID == "merge" {
+			t.Errorf("SDLC v2 must not contain unsafe step %q", step.ID)
+		}
+	}
+
 	notify, ok := steps["notify-ready"]
 	if !ok {
-		t.Fatal("feature pipeline must notify maintainers")
+		t.Fatal("SDLC v2 must notify maintainers")
 	}
 	if notify.Type != "bridge" || notify.Action != "comment" || notify.Inputs["repo"] != "alcove-ai/alcove" || notify.Inputs["pr"] != "{{steps.create-pr.outputs.pr_number}}" || fmt.Sprint(notify.Inputs["body"]) == "" {
 		t.Errorf("notify-ready must comment on the created PR, got action=%q inputs=%v", notify.Action, notify.Inputs)
@@ -1043,7 +1073,7 @@ func TestFeaturePipelineRequiresHumanMerge(t *testing.T) {
 
 	awaitCI, ok := steps["await-ci"]
 	if !ok || awaitCI.Depends != "create-pr.Succeeded || ci-fix.Succeeded" {
-		t.Errorf("await-ci must only depend on create-pr and ci-fix, got %q", awaitCI.Depends)
+		t.Errorf("SDLC v2 await-ci must only depend on create-pr and ci-fix, got %q", awaitCI.Depends)
 	}
 }
 

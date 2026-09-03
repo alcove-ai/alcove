@@ -1,9 +1,9 @@
-name: Full SDLC Pipeline
+name: SDLC v2 Pipeline
 trigger:
   github:
     events: [issues]
     actions: [labeled]
-    labels: [ready-for-dev]
+    labels: [ready-for-sdlc-v2]
     repos: [alcove-ai/alcove]
     delivery_mode: polling
 
@@ -15,7 +15,7 @@ workflow:
       repo: alcove-ai/alcove
       issue: "{{trigger.issue_number}}"
       add_assignees: ["alcove-bot"]
-      remove_labels: ["ready-for-dev"]
+      remove_labels: ["ready-for-sdlc-v2"]
 
   - id: implement
     type: agent
@@ -52,7 +52,7 @@ workflow:
   - id: await-ci
     type: bridge
     action: await-checks
-    depends: "create-pr.Succeeded || ci-fix.Succeeded || rebase.Succeeded || conflict-resolve.Succeeded"
+    depends: "create-pr.Succeeded || ci-fix.Succeeded"
     max_iterations: 4
     inputs:
       repo: alcove-ai/alcove
@@ -119,37 +119,23 @@ workflow:
       security_feedback: "{{steps.security-review.outputs.comments}}"
     outputs: [summary]
 
-  - id: rebase
+  - id: notify-ready
     type: bridge
-    action: rebase
+    action: comment
     depends: "code-review.Succeeded && security-review.Succeeded"
-    max_iterations: 3
     inputs:
       repo: alcove-ai/alcove
       pr: "{{steps.create-pr.outputs.pr_number}}"
-      update_method: merge
-    outputs: [status, new_head_sha]
+      body: |
+        ✅ **Automated review complete** — CI, code review, and security review passed.
 
-  - id: conflict-resolve
-    type: agent
-    agent: Autonomous Developer
-    depends: "rebase.Failed"
-    max_iterations: 2
-    inputs:
-      branch: "{{steps.implement.inputs.branch}}"
-      issue_number: "{{trigger.issue_number}}"
-      repo: "alcove-ai/alcove"
-      issue_title: "{{trigger.issue_title}}"
-      issue_body: "{{trigger.issue_body}}"
-      issue_url: "{{trigger.issue_url}}"
-      merge_conflict_details: "{{steps.rebase.outputs.error}}"
-      task_context: "Resolve merge conflicts detected during rebase step. The branch needs to be updated to work with the latest main branch."
-    outputs: [summary]
+        This PR requires **human review and manual merge**.
 
-  - id: merge
+  - id: label-ready
     type: bridge
-    action: merge
-    depends: "rebase.Succeeded || (conflict-resolve.Succeeded && await-ci.Succeeded)"
+    action: update-issue
+    depends: "code-review.Succeeded && security-review.Succeeded"
     inputs:
       repo: alcove-ai/alcove
-      pr: "{{steps.create-pr.outputs.pr_number}}"
+      issue: "{{trigger.issue_number}}"
+      add_labels: ["needs-human-review"]
