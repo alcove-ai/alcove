@@ -2285,7 +2285,7 @@ func (a *API) handleWebhookGitHub(w http.ResponseWriter, r *http.Request) {
 		if after, ok := payload["after"].(string); ok {
 			sha = after
 		}
-	case "pull_request":
+	case "pull_request", "pull_request_review", "pull_request_review_comment":
 		if pr, ok := payload["pull_request"].(map[string]any); ok {
 			if head, ok := pr["head"].(map[string]any); ok {
 				if s, ok := head["sha"].(string); ok {
