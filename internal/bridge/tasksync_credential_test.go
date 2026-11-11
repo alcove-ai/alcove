@@ -28,7 +28,8 @@ func TestCredentialValidation(t *testing.T) {
 		{"github", true},
 		{"gitlab", true},
 		{"jira", true},
-		{"splunk", true},
+		{"sumo", true},
+		{"splunk", false},
 		{"unknown", false},
 		{"", false},
 	}

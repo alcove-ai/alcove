@@ -34,7 +34,7 @@
 //	GATE_VERTEX_PROJECT    — Vertex AI project ID
 //	GATE_LEDGER_URL        — URL to send proxy logs to
 //	GATE_GITLAB_HOST       — self-hosted GitLab hostname (default: gitlab.com)
-//	GATE_SPLUNK_HOST       — Splunk API hostname for custom instances
+//	GATE_SUMO_HOST         — Sumo Logic API hostname (e.g., api.us2.sumologic.com)
 //	GATE_TOOL_CONFIGS      — JSON map of tool name → proxy config (api_host, auth_header, auth_format)
 package main
 
@@ -175,7 +175,7 @@ func loadConfig() (gate.Config, error) {
 	ledgerURL := os.Getenv("GATE_LEDGER_URL")
 
 	gitlabHost := os.Getenv("GATE_GITLAB_HOST")
-	splunkHost := os.Getenv("GATE_SPLUNK_HOST")
+	sumoHost := os.Getenv("GATE_SUMO_HOST")
 
 	var toolConfigs map[string]gate.ToolConfig
 	if tcJSON := os.Getenv("GATE_TOOL_CONFIGS"); tcJSON != "" {
@@ -188,16 +188,17 @@ func loadConfig() (gate.Config, error) {
 		toolConfigs = make(map[string]gate.ToolConfig)
 	}
 
-	// Apply GATE_SPLUNK_HOST override for custom Splunk instances.
-	if splunkHost != "" {
-		if tc, ok := toolConfigs["splunk"]; ok {
-			tc.APIHost = splunkHost
-			toolConfigs["splunk"] = tc
+	// Apply GATE_SUMO_HOST: Sumo Logic uses HTTP Basic auth with
+	// "accessId:accessKey", stored as a single credential.
+	if sumoHost != "" {
+		if tc, ok := toolConfigs["sumo"]; ok {
+			tc.APIHost = sumoHost
+			toolConfigs["sumo"] = tc
 		} else {
-			toolConfigs["splunk"] = gate.ToolConfig{
-				APIHost:    splunkHost,
+			toolConfigs["sumo"] = gate.ToolConfig{
+				APIHost:    sumoHost,
 				AuthHeader: "Authorization",
-				AuthFormat: "bearer",
+				AuthFormat: "basic",
 			}
 		}
 	}

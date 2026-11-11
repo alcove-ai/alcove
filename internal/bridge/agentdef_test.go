@@ -100,7 +100,7 @@ func TestParseAgentDefinitionWithCredentials(t *testing.T) {
 name: Test Agent
 prompt: "Do something"
 credentials:
-  SPLUNK_TOKEN: splunk
+  SUMO_ACCESS_KEY: sumo-access-key
   JIRA_TOKEN: jira
   VERTEX_SA_JSON: google-vertex
 `
@@ -111,8 +111,8 @@ credentials:
 	if len(def.Credentials) != 3 {
 		t.Fatalf("expected 3 credentials, got %d", len(def.Credentials))
 	}
-	if def.Credentials["SPLUNK_TOKEN"] != "splunk" {
-		t.Errorf("SPLUNK_TOKEN: got %q, want %q", def.Credentials["SPLUNK_TOKEN"], "splunk")
+	if def.Credentials["SUMO_ACCESS_KEY"] != "sumo-access-key" {
+		t.Errorf("SUMO_ACCESS_KEY: got %q, want %q", def.Credentials["SUMO_ACCESS_KEY"], "sumo-access-key")
 	}
 	if def.Credentials["JIRA_TOKEN"] != "jira" {
 		t.Errorf("JIRA_TOKEN: got %q, want %q", def.Credentials["JIRA_TOKEN"], "jira")
@@ -124,12 +124,12 @@ credentials:
 
 func TestParseAgentDefinitionExecutableWithCredentials(t *testing.T) {
 	yamlData := `
-name: Splunk Log Analyzer
+name: Sumo Log Analyzer
 executable:
-  url: https://github.com/pulp/pulp-service/releases/download/v1/agent-splunk
+  url: https://github.com/pulp/pulp-service/releases/download/v1/agent-sumo
   args: ["--model", "claude-opus-4-6"]
 credentials:
-  SPLUNK_TOKEN: splunk
+  SUMO_ACCESS_KEY: sumo-access-key
   JIRA_TOKEN: jira
 `
 	def, err := ParseAgentDefinition([]byte(yamlData))
@@ -142,8 +142,8 @@ credentials:
 	if len(def.Credentials) != 2 {
 		t.Fatalf("expected 2 credentials, got %d", len(def.Credentials))
 	}
-	if def.Credentials["SPLUNK_TOKEN"] != "splunk" {
-		t.Errorf("SPLUNK_TOKEN: got %q, want %q", def.Credentials["SPLUNK_TOKEN"], "splunk")
+	if def.Credentials["SUMO_ACCESS_KEY"] != "sumo-access-key" {
+		t.Errorf("SUMO_ACCESS_KEY: got %q, want %q", def.Credentials["SUMO_ACCESS_KEY"], "sumo-access-key")
 	}
 }
 

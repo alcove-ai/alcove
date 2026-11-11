@@ -1,0 +1,106 @@
+# Sumo Logic API policy rule sets
+#
+# Each rule set maps to one or more HTTP method+host+path combinations that
+# correspond to the operations defined in internal/gate/scope.go's
+# mapSumoOperation() function.
+#
+# Path patterns use "*" to match a single path segment and "**" to match
+# one or more segments. The host "*.sumologic.com" matches every Sumo Logic
+# deployment (api.sumologic.com, api.us2.sumologic.com, api.eu.sumologic.com,
+# ...). The deployment actually used is selected by the sumo credential's
+# api_host.
+#
+# Paths include the API version segment (/api/v1/..., /api/v2/...); "*" is
+# used for the version so rules keep working across API versions.
+
+rule_sets:
+  # ---------------------------------------------------------------------------
+  # Search Job API
+  # ---------------------------------------------------------------------------
+  - name: sumo-search
+    rules:
+      # POST /api/v1/search/jobs (create search job)
+      - allow:
+          method: POST
+          host: "*.sumologic.com"
+          path: "/api/*/search/jobs"
+      # GET /api/v1/search/jobs/{id} (poll search job status)
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/*/search/jobs/*"
+      # DELETE /api/v1/search/jobs/{id} (clean up a finished search job)
+      - allow:
+          method: DELETE
+          host: "*.sumologic.com"
+          path: "/api/*/search/jobs/*"
+
+  - name: sumo-read-results
+    rules:
+      # GET /api/v1/search/jobs/{id}/messages (raw log messages)
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/*/search/jobs/*/messages"
+      # GET /api/v1/search/jobs/{id}/records (aggregate results)
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/*/search/jobs/*/records"
+
+  # ---------------------------------------------------------------------------
+  # Read operations
+  # ---------------------------------------------------------------------------
+  - name: sumo-read-content
+    rules:
+      # GET /api/v2/content/** (saved searches, folders, dashboards)
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/*/content/**"
+
+  - name: sumo-read-monitors
+    rules:
+      # GET /api/v1/monitors
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/*/monitors"
+      # GET /api/v1/monitors/** (monitor details, root folder, search)
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/*/monitors/**"
+
+  # ---------------------------------------------------------------------------
+  # General read/write
+  # ---------------------------------------------------------------------------
+  - name: sumo-read
+    rules:
+      - allow:
+          method: GET
+          host: "*.sumologic.com"
+          path: "/api/**"
+      - allow:
+          method: HEAD
+          host: "*.sumologic.com"
+          path: "/api/**"
+
+  - name: sumo-write
+    rules:
+      - allow:
+          method: POST
+          host: "*.sumologic.com"
+          path: "/api/**"
+      - allow:
+          method: PUT
+          host: "*.sumologic.com"
+          path: "/api/**"
+      - allow:
+          method: PATCH
+          host: "*.sumologic.com"
+          path: "/api/**"
+      - allow:
+          method: DELETE
+          host: "*.sumologic.com"
+          path: "/api/**"

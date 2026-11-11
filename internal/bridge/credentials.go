@@ -50,7 +50,7 @@ func ProviderCategory(provider string) string {
 	switch provider {
 	case "anthropic", "google-vertex", "claude-oauth":
 		return "llm"
-	case "github", "gitlab", "jira", "splunk":
+	case "github", "gitlab", "jira", "sumo":
 		return "scm"
 	default:
 		return "generic"
@@ -423,7 +423,7 @@ func (cs *CredentialStore) FirstAvailableProvider(ctx context.Context, teamID st
 		`SELECT id, name, provider, auth_type, project_id, region, api_host, created_at, updated_at, COALESCE(team_id::text, '')
 		FROM provider_credentials
 		WHERE team_id = $1
-		AND provider NOT IN ('github', 'gitlab', 'jira', 'splunk', 'generic')
+		AND provider NOT IN ('github', 'gitlab', 'jira', 'sumo', 'generic')
 		ORDER BY created_at ASC LIMIT 1`,
 		teamID,
 	).Scan(&c.ID, &c.Name, &c.Provider, &c.AuthType,
@@ -506,7 +506,7 @@ func (cs *CredentialStore) ListDistinctProviders(ctx context.Context, teamID str
 		`SELECT DISTINCT ON (provider) id, name, provider, auth_type, project_id, region, api_host, created_at, updated_at, COALESCE(team_id::text, '')
 		FROM provider_credentials
 		WHERE team_id = $1
-		AND provider NOT IN ('github', 'gitlab', 'jira', 'splunk', 'generic')
+		AND provider NOT IN ('github', 'gitlab', 'jira', 'sumo', 'generic')
 		ORDER BY provider, created_at DESC`,
 		teamID)
 	if err != nil {

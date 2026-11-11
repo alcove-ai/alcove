@@ -16,9 +16,9 @@ Your compiled agent never sees real credentials. Here is the flow:
 4. Gate forwards the request to the real API and returns the response.
 5. Your agent receives the response without ever handling real secrets.
 
-This applies to the LLM API, GitHub, GitLab, and Jira. For services that Gate
-does not proxy (e.g., Splunk), use the `credentials` field to inject real
-tokens directly (see [Direct Credential Injection](#direct-credential-injection)).
+This applies to the LLM API, GitHub, GitLab, Jira, and Sumo Logic. For
+services that Gate does not proxy (e.g., an internal API or a non-HTTP
+service), use the `credentials` field to inject real tokens directly (see [Direct Credential Injection](#direct-credential-injection)).
 
 ## Environment Variable Reference
 
@@ -76,6 +76,14 @@ agents should read these at startup.
 | `JIRA_TOKEN` | Dummy token -- routed through Gate |
 | `JIRA_API_URL` | `http://gate-{id}:8443/jira` |
 
+### Sumo Logic (when scope includes `sumo`)
+
+| Variable | Description |
+|----------|-------------|
+| `SUMO_ACCESS_ID` | Dummy value -- Gate replaces the Basic auth header with the real credential |
+| `SUMO_ACCESS_KEY` | Dummy value -- Gate replaces the Basic auth header with the real credential |
+| `SUMO_API_URL` | `https://<api_host>/api` (default `https://api.sumologic.com/api`) |
+
 ### Infrastructure
 
 | Variable | Description |
@@ -119,19 +127,19 @@ into the Skiff container's environment. Use this for services that Gate does
 not proxy:
 
 ```yaml
-name: Splunk Log Analyzer
+name: Inventory Reporter
 executable:
-  url: https://github.com/org/repo/releases/download/v1/agent-splunk
+  url: https://github.com/org/repo/releases/download/v1/agent-inventory
 credentials:
-  SPLUNK_TOKEN: splunk
-  SPLUNK_URL: splunk-url
+  INVENTORY_TOKEN: inventory-token
+  INVENTORY_URL: inventory-url
 ```
 
 The key is the environment variable name; the value is the credential provider
 name in the credential store. Bridge resolves each provider name and injects
 the real credential at dispatch time.
 
-For Gate-proxied services (GitHub, GitLab, Jira), prefer using the `profiles`
+For Gate-proxied services (GitHub, GitLab, Jira, Sumo Logic), prefer using the `profiles`
 field and the service environment variables instead. Gate provides
 operation-level scope enforcement that direct injection does not.
 
@@ -202,13 +210,19 @@ curl -H "Authorization: Bearer $JIRA_TOKEN" \
   "$JIRA_API_URL/rest/api/2/search?jql=project=PROJ"
 ```
 
-### Splunk call (direct credential injection)
+### Sumo Logic call (through Gate)
 
 ```bash
-# Requires credentials: { SPLUNK_TOKEN: splunk, SPLUNK_URL: splunk-url }
-curl -X POST "$SPLUNK_URL/services/search/jobs" \
-  -H "Authorization: Bearer $SPLUNK_TOKEN" \
-  -d 'search=search index=main | head 10'
+# Requires a "sumo" credential and a profile that grants sumo-search /
+# sumo-read-results. SUMO_ACCESS_ID/SUMO_ACCESS_KEY are dummies; Gate swaps
+# in the real accessId:accessKey.
+JOB_ID=$(curl -s -u "$SUMO_ACCESS_ID:$SUMO_ACCESS_KEY" \
+  -H "Content-Type: application/json" \
+  -X POST "$SUMO_API_URL/v1/search/jobs" \
+  -d '{"query":"_sourceCategory=prod/pulp error","from":"-15m","to":"now"}' \
+  | jq -r .id)
+curl -s -u "$SUMO_ACCESS_ID:$SUMO_ACCESS_KEY" \
+  "$SUMO_API_URL/v1/search/jobs/$JOB_ID/messages?offset=0&limit=100"
 ```
 
 ## Security Profiles for Compiled Agents

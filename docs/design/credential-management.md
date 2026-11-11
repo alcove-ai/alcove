@@ -235,6 +235,31 @@ This mirrors the existing pattern for Jira credentials and ensures that:
 - Gate's `identifyServiceFromHost()` function checks custom GitLab host before hardcoded patterns
 - All environment variables are team-scoped (derived from team credential at dispatch time)
 
+### Sumo Logic API Host Plumbing
+
+Sumo Logic credentials (`provider: sumo`) store `accessId:accessKey`, which Gate
+sends as HTTP Basic auth. The credential's `api_host` selects the Sumo Logic
+deployment; when empty, `api.sumologic.com` is used. The dispatcher
+(`applySumoEnv()`) always sets:
+
+- **`SUMO_API_URL`** (Skiff) — `https://<host>/api`
+- **`SUMO_ACCESS_ID`** / **`SUMO_ACCESS_KEY`** (Skiff) — dummy session tokens
+- **`GATE_SUMO_HOST`** (Gate) — the hostname, registered as a MITM domain with Basic auth injection
+
+For example, `api_host: api.us2.sumologic.com` yields:
+```
+SUMO_API_URL=https://api.us2.sumologic.com/api
+GATE_SUMO_HOST=api.us2.sumologic.com
+```
+
+Scope checks for any `*.sumologic.com` host map Search Job API, content, and
+monitor endpoints to operations (`search`, `read_results`, `read_content`,
+`read_monitors`, `read`, `write`); see `mapSumoOperation()` in
+`internal/gate/scope.go` and `.alcove/policy-rules/sumo.yml`.
+
+Migration `045_splunk_to_sumo.sql` converts any remaining `splunk` credentials
+to `generic` secrets (Splunk support was removed).
+
 ## Gate Vertex API Translation
 
 Gate does more than simple header injection for Vertex AI. When the provider is
@@ -274,7 +299,7 @@ Executable agents with `direct_outbound: true` have different credential require
 ### Problem
 - Claude Code agents (non-executable) receive pre-fetched OAuth2 tokens from Bridge, which Gate injects into LLM API requests
 - Executable agents need raw credential material to perform their own authentication directly with external services
-- Example: A Splunk agent needs raw GCP service account JSON to authenticate to Vertex AI, not a pre-fetched OAuth2 token
+- Example: A Sumo Logic log analyzer agent needs raw GCP service account JSON to authenticate to Vertex AI, not a pre-fetched OAuth2 token
 
 ### Solution
 Modified credential resolution in `internal/bridge/dispatcher.go`:

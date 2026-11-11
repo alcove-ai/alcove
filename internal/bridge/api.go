@@ -2073,7 +2073,7 @@ func (a *API) checkCredentialRequirements(ctx context.Context, def *AgentDefinit
 func (a *API) getTeamCredentialProviders(ctx context.Context, teamID string) (map[string]bool, error) {
 	rows, err := a.db.Query(ctx, `
 		SELECT DISTINCT provider FROM provider_credentials
-		WHERE team_id = $1 AND provider IN ('github', 'gitlab', 'jira', 'splunk')
+		WHERE team_id = $1 AND provider IN ('github', 'gitlab', 'jira', 'sumo')
 	`, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("querying team credential providers: %w", err)

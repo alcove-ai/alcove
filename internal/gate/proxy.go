@@ -569,7 +569,7 @@ func (p *Proxy) injectServiceCredential(req *http.Request, service string) {
 		req.Header.Set("Authorization", "Bearer "+cred)
 	case "gitlab":
 		req.Header.Set("PRIVATE-TOKEN", cred)
-	case "jira":
+	case "jira", "sumo":
 		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(cred)))
 	}
 }
@@ -718,7 +718,8 @@ func isServiceHost(host string) bool {
 	return host == "api.github.com" ||
 		strings.Contains(host, "github.com") ||
 		strings.Contains(host, "gitlab") ||
-		strings.HasSuffix(host, ".atlassian.net")
+		strings.HasSuffix(host, ".atlassian.net") ||
+		IsSumoHost(host)
 }
 
 // identifyService returns the service name for a given hostname.
@@ -730,6 +731,8 @@ func identifyService(host string) string {
 		return "gitlab"
 	case strings.HasSuffix(host, ".atlassian.net"):
 		return "jira"
+	case IsSumoHost(host):
+		return "sumo"
 	default:
 		return "unknown"
 	}

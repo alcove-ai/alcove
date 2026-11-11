@@ -1,15 +1,16 @@
-name: Splunk Log Analyzer
-description: Analyzes Splunk logs for 5xx errors and drafts Jira issues
+name: Sumo Log Analyzer
+description: Analyzes Sumo Logic logs for 5xx errors and drafts Jira issues
 executable:
-  url: https://github.com/pulp/pulp-service/releases/download/agent-splunk-v1.0/agent-splunk-linux-amd64
+  url: https://github.com/pulp/pulp-service/releases/download/agent-sumo-v1.0/agent-sumo-linux-amd64
   args: ["--model", "claude-opus-4-6"]
-  env:
-    SPLUNK_INSECURE_SKIP_VERIFY: "true"
 timeout: 1800
 profiles:
-  - splunk-analyzer
+  - sumo-analyzer
+direct_outbound: true
 credentials:
-  SPLUNK_TOKEN: splunk
+  SUMO_API_URL: SUMO_API_URL
+  SUMO_ACCESS_ID: SUMO_ACCESS_ID
+  SUMO_ACCESS_KEY: SUMO_ACCESS_KEY
   JIRA_TOKEN: jira
   VERTEX_SA_JSON: google-vertex
 trigger:

@@ -105,18 +105,18 @@ else
   fail "Generic count: $GENERIC_COUNT (expected 2)"
 fi
 
-# Test 6: Splunk credential alongside LLM (was broken, now fixed)
-log "Test 6: Splunk + LLM coexistence (bug fix)"
-SPLUNK_RESP=$(curl -s -X POST "$BRIDGE_URL/api/v1/credentials" \
+# Test 6: Sumo Logic credential alongside LLM
+log "Test 6: Sumo Logic + LLM coexistence"
+SUMO_RESP=$(curl -s -X POST "$BRIDGE_URL/api/v1/credentials" \
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Alcove-Team: $TEAM_ID" \
-  -d '{"name":"splunk","provider":"splunk","auth_type":"api_key","credential":"splunk-token-fake"}')
-SPLUNK_ID=$(echo "$SPLUNK_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id','ERROR'))")
-if [ "$SPLUNK_ID" != "ERROR" ]; then
-  pass "Created Splunk credential alongside LLM (bug fixed)"
+  -d '{"name":"sumo","provider":"sumo","auth_type":"api_key","credential":"suFAKEID:sumo-key-fake"}')
+SUMO_ID=$(echo "$SUMO_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id','ERROR'))")
+if [ "$SUMO_ID" != "ERROR" ]; then
+  pass "Created Sumo Logic credential alongside LLM"
 else
-  fail "Splunk create failed: $SPLUNK_RESP"
+  fail "Sumo Logic create failed: $SUMO_RESP"
 fi
 
 # Test 7: Delete generic secret
@@ -133,7 +133,7 @@ fi
 # Cleanup
 curl -s -X DELETE "$BRIDGE_URL/api/v1/credentials/$SECRET2_ID" -H "Authorization: Bearer $USER_TOKEN" > /dev/null 2>&1
 curl -s -X DELETE "$BRIDGE_URL/api/v1/credentials/$LLM_ID" -H "Authorization: Bearer $USER_TOKEN" > /dev/null 2>&1
-curl -s -X DELETE "$BRIDGE_URL/api/v1/credentials/$SPLUNK_ID" -H "Authorization: Bearer $USER_TOKEN" > /dev/null 2>&1
+curl -s -X DELETE "$BRIDGE_URL/api/v1/credentials/$SUMO_ID" -H "Authorization: Bearer $USER_TOKEN" > /dev/null 2>&1
 
 # Summary
 echo ""

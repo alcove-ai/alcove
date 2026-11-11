@@ -25,6 +25,9 @@ func TestCategorize(t *testing.T) {
 		{"MY_API_KEY", "Generic Secrets"},
 		{"CUSTOM_SECRET", "Generic Secrets"},
 		{"DB_PASSWORD", "Generic Secrets"},
+		{"SUMO_ACCESS_ID", "Generic Secrets"},
+		{"SUMO_ACCESS_KEY", "Generic Secrets"},
+		{"SUMO_API_URL", "SCM Gateway URLs"},
 		{"SOME_RANDOM_VAR", "Other"},
 	}
 	for _, tt := range tests {
@@ -90,6 +93,10 @@ func TestClassify(t *testing.T) {
 		{"MY_API_KEY", "sk-real-secret", "sensitive"},
 		{"CUSTOM_SECRET", "real-value", "sensitive"},
 		{"SESSION_TOKEN", "real-session-token", "sensitive"},
+		{"SUMO_ACCESS_ID", "suABCDEF12345678", "sensitive"},
+		{"SUMO_ACCESS_KEY", "real-sumo-access-key", "sensitive"},
+		{"SUMO_API_URL", "https://api.sumologic.com/api", "safe"},
+		{"SUMO_ACCESS_KEY", "alcove-session-abc123", "dummy"},
 		{"TASK_ID", "abc-123", "safe"},
 		{"HOME", "/home/skiff", "safe"},
 	}

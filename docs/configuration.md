@@ -199,6 +199,7 @@ they are documented here for debugging and for custom deployment scenarios.
 | `GATE_VERTEX_REGION` | string | `us-east5` | Vertex AI region for API URL construction. |
 | `GATE_VERTEX_PROJECT` | string | _(unset)_ | Vertex AI project ID for API URL construction. |
 | `GATE_GITLAB_HOST` | string | `gitlab.com` | GitLab hostname for self-hosted GitLab instances. |
+| `GATE_SUMO_HOST` | string | _(injected)_ | Sumo Logic API hostname for MITM interception and Basic auth injection. Set by Bridge from the `sumo` credential's `api_host` (default `api.sumologic.com`). |
 | `GATE_CA_CERT_PEM` | string | _(injected)_ | Base64-encoded ephemeral CA certificate PEM for MITM TLS. Gate signs leaf certs with this CA to intercept CONNECT tunnels to service domains. |
 | `GATE_CA_KEY_PEM` | string | _(injected)_ | Base64-encoded ephemeral CA private key PEM for MITM TLS leaf cert signing. Exists only in Gate's memory. |
 | `GATE_ENFORCEMENT_MODE` | string | _(unset)_ | Enforcement mode: empty or `enforce` (default) denies unauthorized requests; `monitor` logs all requests but allows them regardless of scope. Set via `enforcement_mode` in agent definitions. |
@@ -254,6 +255,8 @@ connections via MITM TLS through HTTP_PROXY.
 | `GITLAB_TOKEN` | string | _(injected)_ | Dummy GitLab token. Gate intercepts CONNECT tunnels to GitLab and swaps it for the real PAT. |
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | string | _(injected)_ | Alias recognized by some GitLab tooling. |
 | `JIRA_TOKEN` | string | _(injected)_ | Dummy JIRA token. Gate intercepts CONNECT tunnels to Jira and swaps it for real credentials (Basic auth). |
+| `SUMO_ACCESS_ID` / `SUMO_ACCESS_KEY` | string | _(injected)_ | Dummy Sumo Logic access ID/key. Gate intercepts CONNECT tunnels to `*.sumologic.com` and replaces the Basic auth header with the real `accessId:accessKey`. |
+| `SUMO_API_URL` | string | _(injected)_ | Sumo Logic API base URL, `https://<api_host>/api` (default `https://api.sumologic.com/api`). |
 | `GATE_CREDENTIAL_URL` | string | _(injected)_ | Gate endpoint URL used by the git credential helper to acquire tokens. |
 | `GIT_SSH_COMMAND` | string | _(injected)_ | Set to disable SSH-based git operations (forces HTTPS through Gate). |
 | `ALCOVE_CA_CERT_PEM` | string | _(injected)_ | Base64-encoded ephemeral CA certificate PEM for MITM TLS. skiff-init writes this to a file and sets `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`. |
@@ -1014,12 +1017,15 @@ Duplicate plugins are automatically deduplicated.
 Agent definitions can reference stored credentials by name and have them injected as environment variables at dispatch time. This enables agents (especially executable agents) to access custom services using Alcove's encrypted credential store.
 
 ```yaml
-name: Splunk Log Analyzer
+name: Sumo Log Analyzer
 executable:
-  url: https://github.com/pulp/pulp-service/releases/download/v1/agent-splunk
+  url: https://github.com/pulp/pulp-service/releases/download/v1/agent-sumo
   args: ["--model", "claude-opus-4-6"]
+direct_outbound: true
 credentials:
-  SPLUNK_TOKEN: splunk
+  SUMO_API_URL: SUMO_API_URL
+  SUMO_ACCESS_ID: SUMO_ACCESS_ID
+  SUMO_ACCESS_KEY: SUMO_ACCESS_KEY
   JIRA_TOKEN: jira
   VERTEX_SA_JSON: google-vertex
 ```
@@ -1039,10 +1045,24 @@ Create credentials via the dashboard or API:
 
 ```bash
 curl -X POST /api/v1/credentials -d '{
-  "name": "Splunk",
-  "provider": "splunk",
-  "auth_type": "api_key", 
-  "credential": "my-splunk-bearer-token"
+  "name": "SUMO_ACCESS_KEY",
+  "provider": "generic",
+  "auth_type": "secret",
+  "credential": "my-sumo-access-key"
+}'
+```
+
+For Gate-proxied Sumo Logic access (agents never see the real key), create a
+`sumo` credential instead. The credential is `accessId:accessKey`, and
+`api_host` selects the deployment (default `api.sumologic.com`):
+
+```bash
+curl -X POST /api/v1/credentials -d '{
+  "name": "Sumo Logic",
+  "provider": "sumo",
+  "auth_type": "api_key",
+  "credential": "suACCESSID:my-sumo-access-key",
+  "api_host": "api.us2.sumologic.com"
 }'
 ```
 
@@ -1272,11 +1292,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # export ALCOVE_DEBUG=true
 
 # ── Service Credentials (for Gate proxy) ──────────────────────
-# GITHUB_TOKEN, GITLAB_TOKEN, and JIRA_TOKEN are stored via the
+# GitHub, GitLab, Jira, and Sumo Logic credentials are stored via the
 # credential API and injected as dummy tokens into Skiff containers
 # by Bridge. Gate swaps them for real credentials at proxy time.
 #
-# For services without Gate proxy support (e.g., Splunk), use the
+# For services without Gate proxy support, use the
 # credentials field in agent definitions to inject real tokens
 # directly. See docs/compiled-agents.md for details.
 

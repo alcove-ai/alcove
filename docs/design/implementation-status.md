@@ -593,5 +593,6 @@ See the full roadmap in [architecture-decisions.md](architecture-decisions.md#ro
 | `GATE_VERTEX_REGION` | Vertex AI region (default `us-east5`) |
 | `GATE_VERTEX_PROJECT` | GCP project ID for Vertex AI |
 | `GATE_GITLAB_HOST` | GitLab hostname for self-hosted instances (default `gitlab.com`) |
+| `GATE_SUMO_HOST` | Sumo Logic API hostname (from the `sumo` credential's `api_host`, default `api.sumologic.com`) |
 | `GATE_CA_CERT_PEM` | Ephemeral CA certificate PEM for MITM TLS leaf cert signing |
 | `GATE_CA_KEY_PEM` | Ephemeral CA private key PEM for MITM TLS leaf cert signing |

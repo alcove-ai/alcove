@@ -15,7 +15,7 @@ Previously, agents would be dispatched successfully even when required credentia
 When agent repositories are synced, Bridge validates that every agent's security profile operations can be satisfied by the team's configured credentials:
 
 1. **Profile Resolution**: For each agent definition, resolve its security profiles
-2. **Credential Requirements**: Extract tool service requirements (github, gitlab, jira, splunk) from profile tools
+2. **Credential Requirements**: Extract tool service requirements (github, gitlab, jira, sumo) from profile tools
 3. **Credential Check**: Query available team credentials to verify required services are configured
 4. **Warning Storage**: Store `sync_warning` on agent definitions with missing credential types
 
@@ -128,7 +128,7 @@ Rationale: Credentials can be added between sync cycles, some agents may do usef
 
 ### Validation Granularity
 
-Only validates credential **type** existence (github, gitlab, jira, splunk), not specific permission scopes. Scope validation would require calling external APIs and is handled at runtime by the proxy layer.
+Only validates credential **type** existence (github, gitlab, jira, sumo), not specific permission scopes. Scope validation would require calling external APIs and is handled at runtime by the proxy layer.
 
 ### Performance
 

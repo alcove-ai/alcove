@@ -456,6 +456,8 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 				servicesNeeded["gitlab"] = true
 			case strings.HasSuffix(host, ".atlassian.net"):
 				servicesNeeded["jira"] = true
+			case host == "sumologic.com" || strings.HasSuffix(host, ".sumologic.com"):
+				servicesNeeded["sumo"] = true
 			}
 		}
 	}
@@ -471,7 +473,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	}
 	scmAPIHosts := make(map[string]string)
 	for service := range servicesNeeded {
-		if service == "github" || service == "gitlab" || service == "jira" || service == "splunk" {
+		if service == "github" || service == "gitlab" || service == "jira" || service == "sumo" {
 			realToken, apiHost, err := d.credStore.AcquireSCMTokenForOwner(ctx, service, activeTeamID)
 			if err != nil {
 				log.Printf("warning: no credential for %s: %v", service, err)
@@ -621,8 +623,8 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 			skiffEnv["JIRA_URL"] = strings.TrimRight(host, "/")
 		}
 	}
-	if token, ok := scmDummyTokens["splunk"]; ok {
-		skiffEnv["SPLUNK_TOKEN"] = token
+	if token, ok := scmDummyTokens["sumo"]; ok {
+		applySumoEnv(skiffEnv, gateEnv, token, scmAPIHosts["sumo"])
 	}
 
 	// ResolveCatalogItemsToSkillRepos converts enabled CatalogItem structs to SkillRepo structs
@@ -973,6 +975,26 @@ func (d *Dispatcher) updateSessionStatus(ctx context.Context, sessionID, status 
 // stripURLToHost extracts the hostname from a value that may be a full URL
 // (e.g., "https://redhat.atlassian.net/") or just a hostname. Returns just
 // the host without scheme, port path, or trailing slash.
+// defaultSumoAPIHost is the Sumo Logic API host used when a sumo credential
+// has no api_host. Other deployments (us2, eu, au, ...) are selected by setting
+// api_host on the credential, e.g. "api.us2.sumologic.com".
+const defaultSumoAPIHost = "api.sumologic.com"
+
+// applySumoEnv sets the Skiff and Gate environment for Sumo Logic access.
+// Sumo Logic uses HTTP Basic auth (accessId:accessKey). Skiff gets placeholder
+// values; Gate replaces the Authorization header with the real credential on
+// MITM-intercepted requests to the Sumo API host.
+func applySumoEnv(skiffEnv, gateEnv map[string]string, dummyToken, apiHost string) {
+	sumoHost := defaultSumoAPIHost
+	if h := stripURLToHost(apiHost); h != "" {
+		sumoHost = h
+	}
+	skiffEnv["SUMO_ACCESS_ID"] = dummyToken
+	skiffEnv["SUMO_ACCESS_KEY"] = dummyToken
+	skiffEnv["SUMO_API_URL"] = "https://" + sumoHost + "/api"
+	gateEnv["GATE_SUMO_HOST"] = sumoHost
+}
+
 func stripURLToHost(apiHost string) string {
 	h := apiHost
 	h = strings.TrimPrefix(h, "https://")

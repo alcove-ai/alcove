@@ -199,7 +199,7 @@ func NewMITMHandler(caCertPEM, caKeyPEM []byte, config *Config) (*MITMHandler, e
 			}
 			m.domains[host] = true
 			// Mark gitlab for wildcard matching (handled in IsMITMDomain)
-		case "jira":
+		case "jira", "sumo":
 			// Handled by wildcard matching in IsMITMDomain
 		}
 	}
@@ -264,6 +264,13 @@ func (m *MITMHandler) IsMITMDomain(hostname string) bool {
 	// Wildcard matching for Jira/Atlassian
 	if _, ok := m.config.Scope.Services["jira"]; ok {
 		if strings.HasSuffix(hostname, ".atlassian.net") {
+			return true
+		}
+	}
+
+	// Wildcard matching for Sumo Logic deployments
+	if _, ok := m.config.Scope.Services["sumo"]; ok {
+		if IsSumoHost(hostname) {
 			return true
 		}
 	}
@@ -484,7 +491,7 @@ func (m *MITMHandler) injectMITMCredential(req *http.Request, hostname string) e
 		}
 	case "gitlab":
 		req.Header.Set("Authorization", "Bearer "+cred)
-	case "jira":
+	case "jira", "sumo":
 		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(cred)))
 	}
 
@@ -511,6 +518,8 @@ func (m *MITMHandler) identifyServiceFromHost(hostname string) string {
 		return "gitlab"
 	case strings.HasSuffix(hostname, ".atlassian.net"):
 		return "jira"
+	case IsSumoHost(hostname):
+		return "sumo"
 	default:
 		return ""
 	}
