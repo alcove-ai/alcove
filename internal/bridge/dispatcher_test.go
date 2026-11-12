@@ -137,6 +137,38 @@ func TestGitLabAPIURLConstruction_EmptyAPIHost(t *testing.T) {
 // TestReconcileOutcomeLogic tests the core logic of the reconcile handler fix
 // that determines whether orphaned sessions should be marked "completed" or "error"
 // based on transcript_event_count. This tests the fix for issue #753.
+func TestApplySumoEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		apiHost  string
+		wantHost string
+	}{
+		{"default deployment", "", "api.sumologic.com"},
+		{"bare regional host", "api.us2.sumologic.com", "api.us2.sumologic.com"},
+		{"URL with api path", "https://api.eu.sumologic.com/api/", "api.eu.sumologic.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			skiffEnv := map[string]string{}
+			gateEnv := map[string]string{}
+			applySumoEnv(skiffEnv, gateEnv, "alcove-session-dummy", tt.apiHost)
+
+			if gateEnv["GATE_SUMO_HOST"] != tt.wantHost {
+				t.Errorf("GATE_SUMO_HOST = %q, want %q", gateEnv["GATE_SUMO_HOST"], tt.wantHost)
+			}
+			if want := "https://" + tt.wantHost + "/api"; skiffEnv["SUMO_API_URL"] != want {
+				t.Errorf("SUMO_API_URL = %q, want %q", skiffEnv["SUMO_API_URL"], want)
+			}
+			// Skiff must only ever see the dummy token, never a real credential.
+			for _, k := range []string{"SUMO_ACCESS_ID", "SUMO_ACCESS_KEY"} {
+				if skiffEnv[k] != "alcove-session-dummy" {
+					t.Errorf("%s = %q, want dummy token", k, skiffEnv[k])
+				}
+			}
+		})
+	}
+}
+
 func TestReconcileOutcomeLogic(t *testing.T) {
 	tests := []struct {
 		name          string

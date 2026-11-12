@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // DEPRECATED: This file contains bespoke per-service scope checking
-// (checkGitHub, checkGitLab, checkAtlassian, checkSplunk) that maps API
+// (checkGitHub, checkGitLab, checkAtlassian, checkSumo) that maps API
 // paths to operation names. It is superseded by the generic HTTP-primitive
 // policy rule system in policy.go. Remove this file once all security
 // profiles have migrated from tools/operations to rules/ format and
@@ -76,11 +76,9 @@ func CheckAccess(method, rawURL string, scope internal.Scope) AccessResult {
 		return checkAtlassian(method, u.Path, scope)
 	}
 
-	// Splunk — check if "splunk" is in scope and URL path looks like a Splunk API
-	if _, ok := scope.Services["splunk"]; ok {
-		if strings.HasPrefix(u.Path, "/services/") || strings.HasPrefix(u.Path, "/servicesNS/") {
-			return checkSplunk(method, u.Path, scope)
-		}
+	// Sumo Logic (api.sumologic.com, api.<deployment>.sumologic.com)
+	if IsSumoHost(host) {
+		return checkSumo(method, u.Path, scope)
 	}
 
 	return AccessResult{Allowed: false, Service: "unknown", Reason: fmt.Sprintf("host %q is not a recognized service", host)}
@@ -88,7 +86,7 @@ func CheckAccess(method, rawURL string, scope internal.Scope) AccessResult {
 
 // CheckServiceAccess evaluates whether a request is permitted for a known
 // service name. This is used by proxy endpoints where the service identity is
-// already known from the URL prefix (e.g., /splunk/) rather than derived from
+// already known from the URL prefix (e.g., /sumo/) rather than derived from
 // the target hostname.
 func CheckServiceAccess(method, path string, service string, scope internal.Scope) AccessResult {
 	switch service {
@@ -98,8 +96,8 @@ func CheckServiceAccess(method, path string, service string, scope internal.Scop
 		return checkGitLab(method, path, scope)
 	case "jira":
 		return checkAtlassian(method, path, scope)
-	case "splunk":
-		return checkSplunk(method, path, scope)
+	case "sumo":
+		return checkSumo(method, path, scope)
 	default:
 		return AccessResult{Allowed: false, Service: service, Reason: fmt.Sprintf("service %q has no scope handler", service)}
 	}
@@ -524,75 +522,89 @@ func mapJiraOperation(method, path string) string {
 	}
 }
 
-// checkSplunk maps Splunk API URLs to operations and checks them against scope.
-func checkSplunk(method, path string, scope internal.Scope) AccessResult {
-	svcScope, ok := scope.Services["splunk"]
+// IsSumoHost reports whether host is a Sumo Logic API endpoint. Every Sumo
+// Logic deployment is served from a sumologic.com subdomain
+// (api.sumologic.com, api.us2.sumologic.com, api.eu.sumologic.com, ...).
+func IsSumoHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "sumologic.com" || strings.HasSuffix(host, ".sumologic.com")
+}
+
+// checkSumo maps Sumo Logic API URLs to operations and checks them against scope.
+func checkSumo(method, path string, scope internal.Scope) AccessResult {
+	svcScope, ok := scope.Services["sumo"]
 	if !ok {
-		return AccessResult{Allowed: false, Service: "splunk", Reason: "splunk not in scope"}
+		return AccessResult{Allowed: false, Service: "sumo", Reason: "sumo not in scope"}
 	}
 
 	method = strings.ToUpper(method)
-	op := mapSplunkOperation(method, strings.TrimPrefix(path, "/"))
+	op := mapSumoOperation(method, strings.TrimPrefix(path, "/"))
 
 	if !operationAllowed(op, svcScope.Operations) {
 		return AccessResult{
 			Allowed:   false,
-			Service:   "splunk",
+			Service:   "sumo",
 			Operation: op,
 			Reason:    fmt.Sprintf("operation %q not permitted", op),
 		}
 	}
-	return AccessResult{Allowed: true, Service: "splunk", Operation: op}
+	return AccessResult{Allowed: true, Service: "sumo", Operation: op}
 }
 
-// mapSplunkOperation maps an HTTP method + API path to a Splunk operation name.
-func mapSplunkOperation(method, path string) string {
+// mapSumoOperation maps an HTTP method + API path to a Sumo Logic operation name.
+//
+// Operations:
+//   - search:          create, poll, and delete Search Job API jobs
+//   - read_results:    read search job messages and records
+//   - read_content:    read the content library (saved searches, folders)
+//   - read_monitors:   read monitors (alerting)
+//   - read:            any other GET/HEAD
+//   - write:           any other mutating request
+func mapSumoOperation(method, path string) string {
 	method = strings.ToUpper(method)
 	path = strings.TrimSuffix(path, "/")
-	normalized := normalizeNumericSegments(path)
 
-	// Strip servicesNS/{user}/{app}/ prefix to get the effective path.
-	if strings.HasPrefix(normalized, "servicesNS/") {
-		parts := strings.SplitN(normalized, "/", 4)
-		if len(parts) >= 4 {
-			normalized = parts[3]
-		}
+	// Strip the api/ prefix and the version segment (v1, v2, ...).
+	effective := strings.TrimPrefix(path, "api/")
+	if parts := strings.SplitN(effective, "/", 2); len(parts) == 2 && len(parts[0]) > 1 && parts[0][0] == 'v' && isNumeric(parts[0][1:]) {
+		effective = parts[1]
 	}
-
-	// Strip services/ prefix for matching.
-	effective := strings.TrimPrefix(normalized, "services/")
+	isRead := method == "GET" || method == "HEAD"
 
 	switch {
-	// Search job results: GET search/jobs/*/results
-	case strings.HasPrefix(effective, "search/jobs/") && strings.HasSuffix(effective, "/results"):
-		return "read_results"
+	// Search job results: GET search/jobs/{id}/messages, GET search/jobs/{id}/records
+	case strings.HasPrefix(effective, "search/jobs/") &&
+		(strings.HasSuffix(effective, "/messages") || strings.HasSuffix(effective, "/records")):
+		if isRead {
+			return "read_results"
+		}
+		return "write"
 
-	// Search jobs: POST search/jobs (create a search), GET search/jobs/* (read search status/details)
+	// Search jobs: POST search/jobs (create), GET search/jobs/{id} (status),
+	// DELETE search/jobs/{id} (clean up a finished job).
 	case effective == "search/jobs" && method == "POST":
 		return "search"
-	case strings.HasPrefix(effective, "search/jobs"):
-		if method == "GET" {
-			return "search"
+	case strings.HasPrefix(effective, "search/jobs/") && strings.Count(effective, "/") == 2 &&
+		(isRead || method == "DELETE"):
+		return "search"
+
+	// Content library (saved searches, folders, dashboards)
+	case effective == "content" || strings.HasPrefix(effective, "content/"):
+		if isRead {
+			return "read_content"
 		}
 		return "write"
 
-	// Saved searches
-	case strings.HasPrefix(effective, "saved/searches"):
-		if method == "GET" {
-			return "read_saved_searches"
-		}
-		return "write"
-
-	// Alerts
-	case strings.HasPrefix(effective, "alerts"):
-		if method == "GET" {
-			return "read_alerts"
+	// Monitors (alerting)
+	case effective == "monitors" || strings.HasPrefix(effective, "monitors/"):
+		if isRead {
+			return "read_monitors"
 		}
 		return "write"
 
 	// Default: read or write based on method
 	default:
-		if method == "GET" || method == "HEAD" {
+		if isRead {
 			return "read"
 		}
 		return "write"

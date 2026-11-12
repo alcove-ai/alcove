@@ -574,7 +574,7 @@ workflow:
     type: agent
     agent: Log Analyzer
     credentials:
-      SPLUNK_TOKEN: splunk-prod        # Override agent's default credential
+      SUMO_ACCESS_KEY: sumo-prod-key   # Override agent's default credential
       CUSTOM_WEBHOOK: slack-webhook    # Additional credential for this step
 ```
 
@@ -583,9 +583,9 @@ override agent values for the same environment variable name. Agent credentials
 not overridden are preserved.
 
 ```
-Agent credentials:  {GITHUB_TOKEN: github, SPLUNK_TOKEN: splunk-staging}
-Step credentials:   {SPLUNK_TOKEN: splunk-prod, CUSTOM_KEY: my-secret}
-Result:             {GITHUB_TOKEN: github, SPLUNK_TOKEN: splunk-prod, CUSTOM_KEY: my-secret}
+Agent credentials:  {GITHUB_TOKEN: github, SUMO_ACCESS_KEY: sumo-staging-key}
+Step credentials:   {SUMO_ACCESS_KEY: sumo-prod-key, CUSTOM_KEY: my-secret}
+Result:             {GITHUB_TOKEN: github, SUMO_ACCESS_KEY: sumo-prod-key, CUSTOM_KEY: my-secret}
 ```
 
 The `credentials` field uses the same format as agent-level credentials: keys

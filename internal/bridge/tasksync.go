@@ -912,7 +912,7 @@ func (s *AgentRepoSyncer) validateCredentialRequirements(ctx context.Context, re
 func (s *AgentRepoSyncer) getTeamCredentialProviders(ctx context.Context, teamID string) (map[string]bool, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT provider FROM provider_credentials
-		WHERE team_id = $1 AND provider IN ('github', 'gitlab', 'jira', 'splunk')
+		WHERE team_id = $1 AND provider IN ('github', 'gitlab', 'jira', 'sumo')
 	`, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("querying team credential providers: %w", err)
@@ -934,7 +934,7 @@ func (s *AgentRepoSyncer) getTeamCredentialProviders(ctx context.Context, teamID
 // isCredentialGatedService returns true if the service requires credentials.
 func isCredentialGatedService(service string) bool {
 	switch service {
-	case "github", "gitlab", "jira", "splunk":
+	case "github", "gitlab", "jira", "sumo":
 		return true
 	default:
 		return false

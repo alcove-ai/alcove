@@ -969,7 +969,7 @@ alcove list</pre>
                         <option value="github">GitHub</option>
                         <option value="gitlab">GitLab</option>
                         <option value="jira">Jira</option>
-                        <option value="splunk">Splunk</option>
+                        <option value="sumo">Sumo Logic</option>
                         <option value="generic">Generic Secret</option>
                     </select>
                 </div>
@@ -1104,16 +1104,21 @@ cat ~/.config/gcloud/application_default_credentials.json   # or just cat and co
                     <small class="form-help">Your Atlassian account email (for API token auth).</small>
                 </div>
             </div>
-            <div data-role="cred-splunk-fields" hidden>
+            <div data-role="cred-sumo-fields" hidden>
                 <div class="form-group">
-                    <label>API Token <span class="required">*</span></label>
-                    <input type="password" data-role="cred-splunk-token" class="input mono" placeholder="Splunk bearer token">
-                    <small class="form-help">Your Splunk API token (bearer token). It will be stored securely and never shown again.</small>
+                    <label>Access ID <span class="required">*</span></label>
+                    <input type="text" data-role="cred-sumo-access-id" class="input mono" placeholder="Sumo Logic access ID">
+                    <small class="form-help">The access ID of your Sumo Logic access key.</small>
+                </div>
+                <div class="form-group">
+                    <label>Access Key <span class="required">*</span></label>
+                    <input type="password" data-role="cred-sumo-access-key" class="input mono" placeholder="Sumo Logic access key">
+                    <small class="form-help">The access key secret. It will be stored securely and never shown again.</small>
                 </div>
                 <div class="form-group">
                     <label>API Host</label>
-                    <input type="text" data-role="cred-splunk-host" class="input" placeholder="splunk.company.com:8089 (optional, for self-hosted instances)">
-                    <small class="form-help">Leave empty for Splunk Cloud. For self-hosted Splunk, enter the hostname and port.</small>
+                    <input type="text" data-role="cred-sumo-host" class="input" placeholder="api.us2.sumologic.com (optional)">
+                    <small class="form-help">Leave empty for the US1 deployment (api.sumologic.com). For other deployments, enter your API endpoint host, e.g. api.us2.sumologic.com or api.eu.sumologic.com.</small>
                 </div>
             </div>
             <div data-role="cred-generic-fields" hidden>

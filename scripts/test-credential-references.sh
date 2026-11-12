@@ -45,21 +45,21 @@ USER_TOKEN=$(curl -s -X POST "$BRIDGE_URL/api/v1/auth/login" -H "Content-Type: a
 # Test 1: Create test credentials
 log "Test 1: Creating test credentials"
 
-# Create Splunk credential
-SPLUNK_RESP=$(curl -s -X POST "$BRIDGE_URL/api/v1/credentials" \
+# Create Sumo Logic credential
+SUMO_RESP=$(curl -s -X POST "$BRIDGE_URL/api/v1/credentials" \
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Test Splunk",
-    "provider": "splunk", 
+    "name": "Test Sumo",
+    "provider": "sumo",
     "auth_type": "api_key",
-    "credential": "splunk-test-token-12345"
+    "credential": "suTESTACCESSID:sumo-test-access-key-12345"
   }')
 
-if echo "$SPLUNK_RESP" | grep -q '"provider":"splunk"'; then
-  pass "Splunk credential created successfully"
+if echo "$SUMO_RESP" | grep -q '"provider":"sumo"'; then
+  pass "Sumo Logic credential created successfully"
 else
-  fail "Failed to create Splunk credential: $SPLUNK_RESP"
+  fail "Failed to create Sumo Logic credential: $SUMO_RESP"
 fi
 
 # Create JIRA credential  
@@ -89,9 +89,9 @@ cat > "$TEMP_DIR/.alcove/agents/test-with-credentials.yml" << 'YAML_EOF'
 name: Test Agent with Credentials
 prompt: |
   Test agent that uses custom service credentials.
-  Check that SPLUNK_TOKEN and JIRA_TOKEN environment variables are set.
+  Check that SUMO_CREDENTIALS and JIRA_TOKEN environment variables are set.
 credentials:
-  SPLUNK_TOKEN: splunk
+  SUMO_CREDENTIALS: sumo
   JIRA_TOKEN: jira
   NONEXISTENT_TOKEN: nonexistent
 timeout: 60

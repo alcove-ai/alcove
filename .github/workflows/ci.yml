@@ -165,7 +165,7 @@ jobs:
           ADMIN_PASSWORD=admin ./scripts/test-api-tokens.sh & pids+=($!)
           ADMIN_PASSWORD=admin ./scripts/test-system-info.sh & pids+=($!)
           ADMIN_PASSWORD=admin ./scripts/test-providers.sh & pids+=($!)
-          ADMIN_PASSWORD=admin ./scripts/test-splunk-proxy.sh & pids+=($!)
+          ADMIN_PASSWORD=admin ./scripts/test-sumo-proxy.sh & pids+=($!)
 
           failed=0
           for pid in "${pids[@]}"; do
@@ -433,7 +433,7 @@ jobs:
           ADMIN_PASSWORD=admin ./scripts/test-api-tokens.sh & pids+=($!)
           ADMIN_PASSWORD=admin ./scripts/test-system-info.sh & pids+=($!)
           ADMIN_PASSWORD=admin ./scripts/test-providers.sh & pids+=($!)
-          ADMIN_PASSWORD=admin ./scripts/test-splunk-proxy.sh & pids+=($!)
+          ADMIN_PASSWORD=admin ./scripts/test-sumo-proxy.sh & pids+=($!)
 
           failed=0
           for pid in "${pids[@]}"; do

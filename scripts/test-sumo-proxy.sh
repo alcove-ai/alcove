@@ -1,7 +1,7 @@
 #!/bin/bash
-# test-splunk-proxy.sh — Tests for Splunk proxy support.
+# test-sumo-proxy.sh — Tests for Sumo Logic proxy support.
 #
-# Verifies Splunk credential CRUD, api_host configuration, security profile
+# Verifies Sumo Logic credential CRUD, api_host configuration, security profile
 # integration, and backward compatibility with existing providers.
 #
 # Prerequisites:
@@ -10,13 +10,13 @@
 #   - ADMIN_PASSWORD set in the environment
 #
 # Usage:
-#   ADMIN_PASSWORD=<pw> ./scripts/test-splunk-proxy.sh
+#   ADMIN_PASSWORD=<pw> ./scripts/test-sumo-proxy.sh
 #
 # Tests:
-#   Test 1: Splunk credential creation (provider "splunk", auth_type "api_key")
-#   Test 2: Splunk credential with custom api_host
-#   Test 3: Splunk in security profile (search, read_results, read operations)
-#   Test 4: Splunk credential deletion
+#   Test 1: Sumo Logic credential creation (provider "sumo", credential "accessId:accessKey")
+#   Test 2: Sumo Logic credential with custom api_host (regional deployment)
+#   Test 3: Sumo Logic in security profile (search, read_results, read operations)
+#   Test 4: Sumo Logic credential deletion
 #   Test 5: Backward compatibility (GitHub, GitLab, Jira still work)
 
 set -euo pipefail
@@ -39,110 +39,110 @@ ADMIN_TOKEN=$(curl -s -X POST "$BRIDGE_URL/api/v1/auth/login" \
 curl -s -X POST "$BRIDGE_URL/api/v1/users" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"username":"splunktest","password":"splunktest123","is_admin":false}' > /dev/null 2>&1 || true
+  -d '{"username":"sumotest","password":"sumotest123","is_admin":false}' > /dev/null 2>&1 || true
 
 USER_TOKEN=$(curl -s -X POST "$BRIDGE_URL/api/v1/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"username":"splunktest","password":"splunktest123"}' | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))")
+  -d '{"username":"sumotest","password":"sumotest123"}' | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))")
 
 echo "  User token: ${USER_TOKEN:0:10}..."
 
 # =====================================================================
-# Test 1: Splunk credential creation
+# Test 1: Sumo Logic credential creation
 # =====================================================================
-log "Test 1: Splunk credential creation"
+log "Test 1: Sumo Logic credential creation"
 
-SPLUNK_RESULT=$(curl -s -w "\n%{http_code}" -X POST "$BRIDGE_URL/api/v1/credentials" \
+SUMO_RESULT=$(curl -s -w "\n%{http_code}" -X POST "$BRIDGE_URL/api/v1/credentials" \
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"test-splunk","provider":"splunk","auth_type":"api_key","credential":"splunk-test-token-abc123"}')
+  -d '{"name":"test-sumo","provider":"sumo","auth_type":"api_key","credential":"suTESTACCESSID:sumo-test-access-key-abc123"}')
 
-SPLUNK_CODE=$(echo "$SPLUNK_RESULT" | tail -1)
-SPLUNK_BODY=$(echo "$SPLUNK_RESULT" | sed '$d')
+SUMO_CODE=$(echo "$SUMO_RESULT" | tail -1)
+SUMO_BODY=$(echo "$SUMO_RESULT" | sed '$d')
 
-if [ "$SPLUNK_CODE" = "200" ] || [ "$SPLUNK_CODE" = "201" ]; then
-  pass "Splunk credential created (HTTP $SPLUNK_CODE)"
+if [ "$SUMO_CODE" = "200" ] || [ "$SUMO_CODE" = "201" ]; then
+  pass "Sumo Logic credential created (HTTP $SUMO_CODE)"
 else
-  fail "Splunk credential creation returned HTTP $SPLUNK_CODE (expected 200 or 201)"
+  fail "Sumo Logic credential creation returned HTTP $SUMO_CODE (expected 200 or 201)"
 fi
 
-SPLUNK_ID=$(echo "$SPLUNK_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id','ERROR'))")
-if [ "$SPLUNK_ID" != "ERROR" ] && [ -n "$SPLUNK_ID" ]; then
-  pass "Splunk credential has valid ID: $SPLUNK_ID"
+SUMO_ID=$(echo "$SUMO_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id','ERROR'))")
+if [ "$SUMO_ID" != "ERROR" ] && [ -n "$SUMO_ID" ]; then
+  pass "Sumo Logic credential has valid ID: $SUMO_ID"
 else
-  fail "Splunk credential missing ID: $SPLUNK_BODY"
+  fail "Sumo Logic credential missing ID: $SUMO_BODY"
 fi
 
 # Verify credential appears in GET /api/v1/credentials
 CRED_LIST=$(curl -s "$BRIDGE_URL/api/v1/credentials" \
   -H "Authorization: Bearer $USER_TOKEN")
-HAS_SPLUNK=$(echo "$CRED_LIST" | python3 -c "
+HAS_SUMO=$(echo "$CRED_LIST" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 creds=d.get('credentials',[])
-found=[c for c in creds if c.get('provider')=='splunk' and c.get('name')=='test-splunk']
+found=[c for c in creds if c.get('provider')=='sumo' and c.get('name')=='test-sumo']
 print('yes' if found else 'no')
 ")
-if [ "$HAS_SPLUNK" = "yes" ]; then
-  pass "Splunk credential appears in credentials list"
+if [ "$HAS_SUMO" = "yes" ]; then
+  pass "Sumo Logic credential appears in credentials list"
 else
-  fail "Splunk credential not found in credentials list"
+  fail "Sumo Logic credential not found in credentials list"
 fi
 
 # Verify provider field is correct
-SPLUNK_PROVIDER=$(echo "$CRED_LIST" | python3 -c "
+SUMO_PROVIDER=$(echo "$CRED_LIST" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 creds=d.get('credentials',[])
 for c in creds:
-    if c.get('name')=='test-splunk':
+    if c.get('name')=='test-sumo':
         print(c.get('provider',''))
         break
 ")
-if [ "$SPLUNK_PROVIDER" = "splunk" ]; then
-  pass "Splunk credential has provider='splunk'"
+if [ "$SUMO_PROVIDER" = "sumo" ]; then
+  pass "Sumo Logic credential has provider='sumo'"
 else
-  fail "Splunk credential has provider='$SPLUNK_PROVIDER' (expected 'splunk')"
+  fail "Sumo Logic credential has provider='$SUMO_PROVIDER' (expected 'sumo')"
 fi
 
 # =====================================================================
-# Test 2: Splunk credential with custom api_host
+# Test 2: Sumo Logic credential with custom api_host
 # =====================================================================
-log "Test 2: Splunk credential with custom api_host"
+log "Test 2: Sumo Logic credential with custom api_host"
 
 # Delete the first credential to avoid one-LLM-per-user conflicts
-# (splunk is not an LLM provider, but let's be safe)
-curl -s -X DELETE "$BRIDGE_URL/api/v1/credentials/$SPLUNK_ID" \
+# (sumo is not an LLM provider, but let's be safe)
+curl -s -X DELETE "$BRIDGE_URL/api/v1/credentials/$SUMO_ID" \
   -H "Authorization: Bearer $USER_TOKEN" > /dev/null 2>&1
 
-SPLUNK_HOST_RESULT=$(curl -s -w "\n%{http_code}" -X POST "$BRIDGE_URL/api/v1/credentials" \
+SUMO_HOST_RESULT=$(curl -s -w "\n%{http_code}" -X POST "$BRIDGE_URL/api/v1/credentials" \
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"test-splunk-hosted","provider":"splunk","auth_type":"api_key","credential":"splunk-hosted-token-xyz","api_host":"https://splunk.example.com:8089"}')
+  -d '{"name":"test-sumo-hosted","provider":"sumo","auth_type":"api_key","credential":"suHOSTEDID:sumo-hosted-access-key-xyz","api_host":"api.us2.sumologic.com"}')
 
-SPLUNK_HOST_CODE=$(echo "$SPLUNK_HOST_RESULT" | tail -1)
-SPLUNK_HOST_BODY=$(echo "$SPLUNK_HOST_RESULT" | sed '$d')
+SUMO_HOST_CODE=$(echo "$SUMO_HOST_RESULT" | tail -1)
+SUMO_HOST_BODY=$(echo "$SUMO_HOST_RESULT" | sed '$d')
 
-if [ "$SPLUNK_HOST_CODE" = "200" ] || [ "$SPLUNK_HOST_CODE" = "201" ]; then
-  pass "Splunk credential with api_host created (HTTP $SPLUNK_HOST_CODE)"
+if [ "$SUMO_HOST_CODE" = "200" ] || [ "$SUMO_HOST_CODE" = "201" ]; then
+  pass "Sumo Logic credential with api_host created (HTTP $SUMO_HOST_CODE)"
 else
-  fail "Splunk credential with api_host returned HTTP $SPLUNK_HOST_CODE (expected 200 or 201)"
+  fail "Sumo Logic credential with api_host returned HTTP $SUMO_HOST_CODE (expected 200 or 201)"
 fi
 
-SPLUNK_HOST_ID=$(echo "$SPLUNK_HOST_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id','ERROR'))")
+SUMO_HOST_ID=$(echo "$SUMO_HOST_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id','ERROR'))")
 
 # Verify api_host is stored correctly
-if [ "$SPLUNK_HOST_ID" != "ERROR" ] && [ -n "$SPLUNK_HOST_ID" ]; then
-  CRED_DETAIL=$(curl -s "$BRIDGE_URL/api/v1/credentials/$SPLUNK_HOST_ID" \
+if [ "$SUMO_HOST_ID" != "ERROR" ] && [ -n "$SUMO_HOST_ID" ]; then
+  CRED_DETAIL=$(curl -s "$BRIDGE_URL/api/v1/credentials/$SUMO_HOST_ID" \
     -H "Authorization: Bearer $USER_TOKEN")
   STORED_HOST=$(echo "$CRED_DETAIL" | python3 -c "import json,sys; print(json.load(sys.stdin).get('api_host',''))")
-  if [ "$STORED_HOST" = "https://splunk.example.com:8089" ]; then
-    pass "Splunk credential api_host stored correctly"
+  if [ "$STORED_HOST" = "api.us2.sumologic.com" ]; then
+    pass "Sumo Logic credential api_host stored correctly"
   else
-    fail "Splunk credential api_host is '$STORED_HOST' (expected 'https://splunk.example.com:8089')"
+    fail "Sumo Logic credential api_host is '$STORED_HOST' (expected 'api.us2.sumologic.com')"
   fi
 else
-  fail "Splunk credential with api_host missing ID"
+  fail "Sumo Logic credential with api_host missing ID"
 fi
 
 # =====================================================================
@@ -154,10 +154,10 @@ PROFILE_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BRIDGE_URL/api/v
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "test-splunk-profile",
-    "description": "Security profile with Splunk access for testing",
+    "name": "test-sumo-profile",
+    "description": "Security profile with Sumo Logic access for testing",
     "tools": {
-      "splunk": {
+      "sumo": {
         "rules": [{
           "repos": ["*"],
           "operations": ["search", "read_results", "read"]
@@ -173,43 +173,43 @@ else
 fi
 
 # =====================================================================
-# Test 4: Splunk credential deletion
+# Test 4: Sumo Logic credential deletion
 # =====================================================================
-log "Test 4: Splunk credential deletion"
+log "Test 4: Sumo Logic credential deletion"
 
 DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-  "$BRIDGE_URL/api/v1/credentials/$SPLUNK_HOST_ID" \
+  "$BRIDGE_URL/api/v1/credentials/$SUMO_HOST_ID" \
   -H "Authorization: Bearer $USER_TOKEN")
 if [ "$DEL_CODE" = "200" ]; then
-  pass "Splunk credential deleted (HTTP 200)"
+  pass "Sumo Logic credential deleted (HTTP 200)"
 else
-  fail "Splunk credential delete returned HTTP $DEL_CODE (expected 200)"
+  fail "Sumo Logic credential delete returned HTTP $DEL_CODE (expected 200)"
 fi
 
 # Verify it's gone
 GONE_CHECK=$(curl -s -o /dev/null -w "%{http_code}" \
-  "$BRIDGE_URL/api/v1/credentials/$SPLUNK_HOST_ID" \
+  "$BRIDGE_URL/api/v1/credentials/$SUMO_HOST_ID" \
   -H "Authorization: Bearer $USER_TOKEN")
 if [ "$GONE_CHECK" = "404" ]; then
-  pass "Deleted Splunk credential returns 404"
+  pass "Deleted Sumo Logic credential returns 404"
 else
-  fail "Deleted Splunk credential returns HTTP $GONE_CHECK (expected 404)"
+  fail "Deleted Sumo Logic credential returns HTTP $GONE_CHECK (expected 404)"
 fi
 
 # Verify it's not in the list
 CRED_LIST_AFTER=$(curl -s "$BRIDGE_URL/api/v1/credentials" \
   -H "Authorization: Bearer $USER_TOKEN")
-SPLUNK_GONE=$(echo "$CRED_LIST_AFTER" | python3 -c "
+SUMO_GONE=$(echo "$CRED_LIST_AFTER" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 creds=d.get('credentials',[])
-found=[c for c in creds if c.get('provider')=='splunk']
+found=[c for c in creds if c.get('provider')=='sumo']
 print('yes' if not found else 'no')
 ")
-if [ "$SPLUNK_GONE" = "yes" ]; then
-  pass "No Splunk credentials remain in list after deletion"
+if [ "$SUMO_GONE" = "yes" ]; then
+  pass "No Sumo Logic credentials remain in list after deletion"
 else
-  fail "Splunk credential still appears in list after deletion"
+  fail "Sumo Logic credential still appears in list after deletion"
 fi
 
 # =====================================================================

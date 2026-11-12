@@ -25,7 +25,9 @@ executable:
   url: file:///usr/local/bin/debug-env
 timeout: 60
 credentials:
-  SPLUNK_TOKEN: splunk
+  SUMO_API_URL: SUMO_API_URL
+  SUMO_ACCESS_ID: SUMO_ACCESS_ID
+  SUMO_ACCESS_KEY: SUMO_ACCESS_KEY
   JIRA_TOKEN: jira
   MY_API_KEY: my-secret
 ```
@@ -44,11 +46,11 @@ This shows up on the Schedules page with a "Run Now" button. Runs in
 | Infrastructure | TASK_ID, SESSION_ID, HAIL_URL, etc. | Always set, safe values |
 | LLM Provider | ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY | API_KEY is a dummy placeholder |
 | SCM Tokens | GITHUB_TOKEN, GITLAB_TOKEN, JIRA_TOKEN | All dummy — Gate swaps for real |
-| SCM Gateway URLs | GITHUB_API_URL, GITLAB_API_URL | Gate proxy endpoints |
+| SCM Gateway URLs | GITHUB_API_URL, GITLAB_API_URL, SUMO_API_URL | Gate proxy endpoints / service API base URLs |
 | Network Proxy | HTTP_PROXY, HTTPS_PROXY, NO_PROXY | Gate proxy settings |
 | Plugins & Catalog | ALCOVE_PLUGINS, ALCOVE_SKILL_REPOS | Plugin/skill configuration |
 | Git Config | GIT_AUTHOR_NAME, REPO, etc. | Git identity and repo settings |
-| Generic Secrets | User-defined via credentials: map | Real values — masked by default |
+| Generic Secrets | User-defined via credentials: map (names containing TOKEN, KEY, SECRET, PASSWORD, CREDENTIAL, AUTH), plus known secrets such as SUMO_ACCESS_ID / SUMO_ACCESS_KEY | Real values masked by default; dummies when Gate proxies the service (e.g. a `sumo` credential) |
 | Runtime | HOME, PATH, USER, etc. | System environment |
 
 ## Annotations

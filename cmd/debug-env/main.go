@@ -48,14 +48,14 @@ var llmVars = map[string]bool{
 var scmTokenVars = map[string]bool{
 	"GITHUB_TOKEN": true, "GH_TOKEN": true, "GITHUB_PERSONAL_ACCESS_TOKEN": true,
 	"GITLAB_TOKEN": true, "GITLAB_PERSONAL_ACCESS_TOKEN": true,
-	"JIRA_TOKEN": true, "SPLUNK_TOKEN": true,
+	"JIRA_TOKEN": true,
 }
 
 var scmURLVars = map[string]bool{
 	"GITHUB_API_URL": true, "GH_HOST": true, "GH_PROTOCOL": true,
 	"GH_PROMPT_DISABLED": true, "GH_NO_UPDATE_NOTIFIER": true,
 	"GITLAB_API_URL": true, "GLAB_HOST": true,
-	"JIRA_API_URL": true, "SPLUNK_URL": true,
+	"JIRA_API_URL": true, "SUMO_API_URL": true,
 }
 
 var proxyVars = map[string]bool{
@@ -73,6 +73,14 @@ var gitVars = map[string]bool{
 	"GIT_COMMITTER_NAME": true, "GIT_COMMITTER_EMAIL": true,
 	"GIT_TERMINAL_PROMPT": true, "GIT_SSH_COMMAND": true,
 	"GATE_CREDENTIAL_URL": true, "REPO": true, "BRANCH": true,
+}
+
+// secretVars are credentials whose names don't match the generic
+// TOKEN/KEY/SECRET/... heuristic but must still be masked. When Gate proxies
+// Sumo Logic these hold dummy session tokens (classified as "dummy"); when
+// injected directly via the credentials: map they hold real values.
+var secretVars = map[string]bool{
+	"SUMO_ACCESS_ID": true, "SUMO_ACCESS_KEY": true,
 }
 
 var runtimeVars = map[string]bool{
@@ -100,6 +108,8 @@ func categorize(key string) string {
 		return "Git Config"
 	case runtimeVars[key]:
 		return "Runtime"
+	case secretVars[key]:
+		return "Generic Secrets"
 	default:
 		// Check if it looks like a secret/credential
 		upper := strings.ToUpper(key)
