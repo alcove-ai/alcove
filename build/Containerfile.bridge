@@ -36,7 +36,16 @@ COPY build/certs/redhat-internal-ca-bundle.pem /etc/pki/ca-trust/source/anchors/
 
 # Install podman CLI for container management (Bridge creates
 # Skiff+Gate containers via whichever runtime is configured).
-RUN dnf install -y podman git && \
+#
+# WORKAROUND: UBI 9 repos ship netavark-3:1.17.2 which requires
+# aardvark-dns >= 3:1.17, but only aardvark-dns-2:1.17.1 is published
+# (epoch mismatch, version is fine). Install netavark with --nodeps so
+# podman resolves. Bridge uses podman as a remote client (CONTAINER_HOST)
+# and never invokes netavark. Remove once UBI publishes aardvark-dns 3:1.17+.
+RUN dnf install -y git aardvark-dns && \
+    cd /tmp && dnf download -y netavark && \
+    rpm -i --nodeps netavark-*.rpm && rm -f netavark-*.rpm && \
+    dnf install -y podman && \
     update-ca-trust && \
     useradd -m -u 1001 -s /sbin/nologin alcove && \
     mkdir -p /tmp/podman-config /tmp/podman-data && \
