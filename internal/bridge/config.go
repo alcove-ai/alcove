@@ -52,7 +52,7 @@ type Config struct {
 
 	// MCPServers is the operator-configured map of allowed MCP servers.
 	// Keyed by server name as defined in the mcp.servers section of alcove.yaml.
-	// TODO(Issue B): used by dispatcher to resolve MCPServer references from agent definitions.
+	// Used by the dispatcher to resolve MCPServer references from agent definitions.
 	MCPServers map[string]MCPServerConfig
 }
 

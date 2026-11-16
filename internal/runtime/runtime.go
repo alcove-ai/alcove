@@ -25,6 +25,15 @@ type TaskHandle struct {
 	GatePort  int
 }
 
+// MCPResourceLimits configures CPU and memory constraints for an MCP server container.
+// Zero-value string fields use the runtime defaults (100m/256Mi requests, 2/4Gi limits).
+type MCPResourceLimits struct {
+	CPURequest    string // e.g., "100m" — default: "100m"
+	MemoryRequest string // e.g., "256Mi" — default: "256Mi"
+	CPULimit      string // e.g., "2" — default: "2"
+	MemoryLimit   string // e.g., "4Gi" — default: "4Gi"
+}
+
 // TaskSpec describes how to run a Skiff pod.
 type TaskSpec struct {
 	TaskID       string
@@ -40,6 +49,20 @@ type TaskSpec struct {
 	DevContainerImage         string            // Container image for the dev container sidecar
 	DevContainerEnv           map[string]string // env vars for dev container (includes SHIM_TOKEN)
 	DevContainerNetworkAccess string            // "internal" or "external"; defaults to "internal"
+
+	// MCP server sidecar fields. All gated on MCPServerImage != "".
+	// Values must come from operator config (Config.MCPServers); never from agent author YAML.
+	MCPServerImage  string            // MCP server container image (from operator config)
+	MCPServerEnv    map[string]string // env vars for MCP server container (from operator config)
+	MCPServerName   string            // name of the MCP server (for logging/observability)
+	MCPFailureMode  string            // "" or "fail" → error; "continue" → warn and start Skiff without MCP
+	MCPResourceLimits MCPResourceLimits // CPU/memory limits for MCP server container (optional overrides)
+}
+
+// MCPContainerName returns the container name for the MCP server sidecar.
+// Example: MCPContainerName("abc123") → "mcp-abc123"
+func MCPContainerName(taskID string) string {
+	return "mcp-" + taskID
 }
 
 // ServiceSpec describes a long-lived infrastructure service (Hail, Ledger).
