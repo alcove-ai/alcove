@@ -233,7 +233,9 @@ jobs:
 
   functional-tests-k8s:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    # Pinned: on the ubuntu-26.04 image the postgres pod in k3s never starts
+    # (no log output, never Ready). Unpin once that is understood.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
