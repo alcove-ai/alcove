@@ -233,9 +233,7 @@ jobs:
 
   functional-tests-k8s:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    # Pinned: on the ubuntu-26.04 image the postgres pod in k3s never starts
-    # (no log output, never Ready). Unpin once that is understood.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -256,6 +254,15 @@ jobs:
 
       - name: Install k3s
         run: |
+          # Ubuntu 26.04 enables apparmor_restrict_unprivileged_unconfined, which
+          # makes containers run under a stacked label
+          # (cri-containerd.apparmor.d//&unconfined) that containerd's AppArmor
+          # profile doesn't recognise as a peer. Signals/ptrace between processes
+          # in the same container get denied, and e.g. gosu in the postgres image
+          # spins forever. Drop once containerd's profile handles stacked labels.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          fi
           curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --write-kubeconfig-mode=644" sh -
           mkdir -p ~/.kube
           sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
