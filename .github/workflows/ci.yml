@@ -310,6 +310,15 @@ jobs:
                 value: alcove
               ports:
               - containerPort: 5432
+              # Without a probe the pod is Ready as soon as the container
+              # starts, before postgres listens. Probe over TCP so the
+              # socket-only server used during initdb doesn't count.
+              readinessProbe:
+                exec:
+                  command: ["pg_isready", "-h", "127.0.0.1", "-U", "alcove"]
+                initialDelaySeconds: 2
+                periodSeconds: 2
+                failureThreshold: 60
           ---
           apiVersion: v1
           kind: Service
@@ -375,6 +384,12 @@ jobs:
             if pg_isready -h localhost -p 5432 -U alcove; then
               echo "PostgreSQL is ready"
               exit 0
+            fi
+            # kubectl port-forward exits after a refused upstream connection;
+            # restart it if it died.
+            if ! pgrep -f 'kubectl port-forward -n alcove svc/alcove-ledger' >/dev/null; then
+              echo "Ledger port-forward died, restarting"
+              nohup kubectl port-forward -n alcove svc/alcove-ledger 5432:5432 >/tmp/pf-ledger.log 2>&1 &
             fi
             echo "Waiting for PostgreSQL... ($i/30)"
             sleep 1
