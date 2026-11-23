@@ -1034,3 +1034,39 @@ func mustMarshal(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+func TestRunTask_SecretEnvPassedToSkiffOnly(t *testing.T) {
+	execFn, calls := fakeExecCommand(t, "ok\n", 0)
+	p := &PodmanRuntime{
+		PodmanBin:   "podman",
+		execCommand: execFn,
+	}
+
+	spec := TaskSpec{
+		TaskID:      "task-secret",
+		Image:       "skiff:latest",
+		GateImage:   "gate:latest",
+		Env:         map[string]string{"FOO": "plain"},
+		SecretEnv:   map[string]string{"FOO": "from-secret"},
+		Network:     "test-net",
+		ExternalNet: "test-ext",
+	}
+	if _, err := p.RunTask(context.Background(), spec); err != nil {
+		t.Fatalf("RunTask() error: %v", err)
+	}
+
+	gateCall := strings.Join((*calls)[0], " ")
+	if strings.Contains(gateCall, "from-secret") {
+		t.Errorf("gate container received secret env: %s", gateCall)
+	}
+	skiffCall := strings.Join((*calls)[1], " ")
+	if !strings.Contains(skiffCall, "FOO=from-secret") {
+		t.Errorf("skiff call missing secret env (SecretEnv should override Env): %s", skiffCall)
+	}
+	if strings.Contains(skiffCall, "FOO=plain") {
+		t.Errorf("skiff call still has plain value: %s", skiffCall)
+	}
+	if redacted := redactEnvArgs((*calls)[1]); strings.Contains(redacted, "from-secret") {
+		t.Errorf("redactEnvArgs leaks secret: %s", redacted)
+	}
+}

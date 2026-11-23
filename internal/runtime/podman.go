@@ -275,6 +275,12 @@ func (p *PodmanRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHandle,
 		}
 	}
 
+	// Sensitive values (e.g. from mounted Kubernetes Secrets) are passed as
+	// regular env vars on podman; redactEnvArgs keeps them out of error logs.
+	for k, v := range spec.SecretEnv {
+		skiffEnv[k] = v
+	}
+
 	for k, v := range skiffEnv {
 		skiffArgs = append(skiffArgs, "--env", k+"="+v)
 	}

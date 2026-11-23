@@ -34,6 +34,18 @@ parameters:
 - name: CREATE_ROUTE
   description: Whether to create an OpenShift Route for alcove-bridge
   value: "true"
+- name: AGENT_SECRET_NAME
+  description: >-
+    Name of a Kubernetes Secret (in the Bridge namespace) to mount into Bridge at
+    /etc/alcove/secrets/<name>/ so agent definitions can reference its keys as
+    k8s-secret:<name>/<key>. Optional; the mount is skipped if the Secret does not exist.
+  value: "alcove-agent-secret"
+- name: K8S_SECRETS_CONFIG
+  description: >-
+    JSON map of mounted Secret name to policy, e.g.
+    {"my-secret":{"allowed_teams":["<team-uuid>"]}}. Only Secrets listed here
+    are usable, and only by the listed teams.
+  value: "{}"
 objects:
 
 # --- ServiceAccount ---
@@ -70,7 +82,9 @@ objects:
     verbs: ["create", "delete", "get"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]
+    # create/patch/delete: per-task Secrets holding k8s-secret credentials,
+    # referenced by skiff pods via secretKeyRef and owned by the task Job.
+    verbs: ["get", "create", "delete", "patch"]
 
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: RoleBinding
@@ -213,9 +227,14 @@ objects:
             value: ${BRIDGE_LLM_REGION}
           - name: GOOGLE_APPLICATION_CREDENTIALS
             value: "/etc/alcove/gcloud/service-account-json"
+          - name: ALCOVE_K8S_SECRETS
+            value: ${K8S_SECRETS_CONFIG}
           volumeMounts:
           - name: vertex-ai-credentials
             mountPath: "/etc/alcove/gcloud/"
+          - name: agent-secret
+            mountPath: "/etc/alcove/secrets/${AGENT_SECRET_NAME}"
+            readOnly: true
           livenessProbe:
             httpGet:
               path: /api/v1/health
@@ -244,6 +263,10 @@ objects:
         - name: vertex-ai-credentials
           secret:
             secretName: alcove-vertex-ai
+            optional: true
+        - name: agent-secret
+          secret:
+            secretName: ${AGENT_SECRET_NAME}
             optional: true
         - name: oauth-cookie-secret
           secret:

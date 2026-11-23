@@ -16,12 +16,13 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
 	"os"
-
+	"sort"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -136,6 +138,9 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 	// (Gate and Skiff share the pod's network namespace).
 	skiffEnv := make(map[string]string)
 	for k, v := range spec.Env {
+		if _, secret := spec.SecretEnv[k]; secret {
+			continue // delivered via secretKeyRef below
+		}
 		skiffEnv[k] = v
 	}
 	// Ensure HOME is set — OpenShift assigns random UIDs that don't exist in
@@ -319,6 +324,13 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 		}
 	}
 
+	// Sensitive env vars are stored in a per-task Secret and referenced via
+	// secretKeyRef so their values never appear in the Job spec.
+	secretName := taskSecretName(spec.TaskID)
+	if len(spec.SecretEnv) > 0 {
+		skiffEnvVars = append(skiffEnvVars, secretEnvVars(secretName, spec.SecretEnv)...)
+	}
+
 	// Skiff is the main container that runs the actual task.
 	skiffContainer := corev1.Container{
 		Name:            "skiff",
@@ -392,10 +404,39 @@ func (k *KubernetesRuntime) RunTask(ctx context.Context, spec TaskSpec) (TaskHan
 	// Per-task policies caused DNS resolution failures on OVN-Kubernetes.
 	// TODO: Re-enable once the root cause of DNS blocking is identified.
 
+	// Create the per-task Secret before the Job so the pod can start.
+	if len(spec.SecretEnv) > 0 {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: k.namespace,
+				Labels:    taskLabels(spec.TaskID),
+			},
+			Type:       corev1.SecretTypeOpaque,
+			StringData: spec.SecretEnv,
+		}
+		if _, err := k.clientset.CoreV1().Secrets(k.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			return TaskHandle{}, fmt.Errorf("creating task secret %s: %w", secretName, err)
+		}
+	}
+
 	// Create the Job.
 	created, err := k.clientset.BatchV1().Jobs(k.namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
+		if len(spec.SecretEnv) > 0 {
+			if delErr := k.deleteTaskSecret(ctx, spec.TaskID); delErr != nil && !apierrors.IsNotFound(delErr) {
+				log.Printf("warning: failed to delete task secret %s: %v", secretName, delErr)
+			}
+		}
 		return TaskHandle{}, fmt.Errorf("creating job %s: %w", name, err)
+	}
+
+	// Make the Job own the Secret so it is garbage-collected with the Job
+	// (TTL cleanup or cancellation). CancelTask also deletes it explicitly.
+	if len(spec.SecretEnv) > 0 {
+		if err := k.setSecretOwner(ctx, secretName, created); err != nil {
+			log.Printf("warning: failed to set owner on task secret %s: %v", secretName, err)
+		}
 	}
 
 	return TaskHandle{
@@ -489,6 +530,60 @@ func (k *KubernetesRuntime) deleteNetworkPolicy(ctx context.Context, taskID stri
 	return k.clientset.NetworkingV1().NetworkPolicies(k.namespace).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
+// taskSecretName returns the name of the per-task Secret holding sensitive
+// skiff env vars. Task IDs are UUIDs, so the name stays within 63 chars.
+func taskSecretName(taskID string) string {
+	return jobName(taskID) + "-env"
+}
+
+// secretEnvVars returns env vars that read each key of env from the named
+// Secret via secretKeyRef, sorted by name for a deterministic pod spec.
+func secretEnvVars(secretName string, env map[string]string) []corev1.EnvVar {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	vars := make([]corev1.EnvVar, 0, len(keys))
+	for _, k := range keys {
+		vars = append(vars, corev1.EnvVar{
+			Name: k,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					Key:                  k,
+				},
+			},
+		})
+	}
+	return vars
+}
+
+// setSecretOwner adds an ownerReference to the Job on the named Secret.
+func (k *KubernetesRuntime) setSecretOwner(ctx context.Context, secretName string, job *batchv1.Job) error {
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"ownerReferences": []metav1.OwnerReference{{
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+				Name:       job.Name,
+				UID:        job.UID,
+			}},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = k.clientset.CoreV1().Secrets(k.namespace).Patch(ctx, secretName, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+// deleteTaskSecret removes the per-task credential Secret.
+// Returns the raw API error so callers can use apierrors.IsNotFound().
+func (k *KubernetesRuntime) deleteTaskSecret(ctx context.Context, taskID string) error {
+	return k.clientset.CoreV1().Secrets(k.namespace).Delete(ctx, taskSecretName(taskID), metav1.DeleteOptions{})
+}
+
 // CancelTask deletes the Job (cascading to its pod) and the associated
 // NetworkPolicy. Errors are logged as warnings but do not cause failure,
 // since the resources may already be cleaned up.
@@ -506,6 +601,11 @@ func (k *KubernetesRuntime) CancelTask(ctx context.Context, handle TaskHandle) e
 	// Delete the associated NetworkPolicy.
 	if err := k.deleteNetworkPolicy(ctx, handle.ID); err != nil && !apierrors.IsNotFound(err) {
 		log.Printf("warning: failed to delete network policy for task %s: %v", handle.ID, err)
+	}
+
+	// Delete the per-task credential Secret (if any).
+	if err := k.deleteTaskSecret(ctx, handle.ID); err != nil && !apierrors.IsNotFound(err) {
+		log.Printf("warning: failed to delete task secret for task %s: %v", handle.ID, err)
 	}
 
 	return nil

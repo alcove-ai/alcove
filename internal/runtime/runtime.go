@@ -40,6 +40,12 @@ type TaskSpec struct {
 	DevContainerImage         string            // Container image for the dev container sidecar
 	DevContainerEnv           map[string]string // env vars for dev container (includes SHIM_TOKEN)
 	DevContainerNetworkAccess string            // "internal" or "external"; defaults to "internal"
+	// SecretEnv holds sensitive env vars for the skiff container only (e.g.
+	// values read from mounted Kubernetes Secrets). Runtimes must keep these
+	// values out of plain-text specs where possible: the Kubernetes runtime
+	// stores them in a per-task Secret referenced via secretKeyRef. Keys here
+	// take precedence over the same keys in Env.
+	SecretEnv map[string]string
 }
 
 // ServiceSpec describes a long-lived infrastructure service (Hail, Ledger).

@@ -332,3 +332,44 @@ if req.Executable != nil && req.DirectOutbound {
 - Raw credentials are only provided to executable agents with `direct_outbound: true`
 - Non-executable agents continue to receive only pre-fetched tokens, maintaining the security boundary
 - Gate never sees raw credential material for any agent type
+
+## Kubernetes Secret Credential Source
+
+**Date: 2026-11-23 (PULP-2745)**
+
+Some credentials, such as S3 bucket keys from app-interface, arrive as Kubernetes
+Secrets. Copying them into the credential store duplicates them, and the copy
+goes stale when they are rotated. Agent definitions can instead reference a
+mounted Secret key directly: `ENV_VAR: k8s-secret:<secret-name>/<key>`.
+
+### Flow
+
+1. Operators mount the Secret into the **Bridge** pod at
+   `/etc/alcove/secrets/<secret-name>/` and list it in `k8s_secrets` (or
+   `ALCOVE_K8S_SECRETS`) with the team UUIDs allowed to use it.
+2. At dispatch, `K8sSecretResolver` (`internal/bridge/k8s_secrets.go`) checks
+   the allowlist and the team, then reads the file. It reads the file on every
+   dispatch, so rotation is picked up automatically.
+3. The dispatcher puts resolved values in `TaskSpec.SecretEnv`, separate from
+   plain `Env`.
+4. The Kubernetes runtime creates a per-task Secret (`alcove-task-<id>-env`),
+   references each key from the skiff container through `secretKeyRef`, and
+   sets the Job as the Secret's owner. Gate and dev containers never receive
+   these values. On Podman, the values are passed as skiff env vars, which are
+   redacted from logs.
+
+### Security Properties
+
+- **Allowlist:** a Secret must be both mounted and configured. Bridge never
+  reads Secrets through the Kubernetes API.
+- **Team scoping:** only teams whose UUIDs are in `allowed_teams` can use a
+  Secret.
+- **Agent type:** only executable agents with `direct_outbound: true` can use
+  this source, the same boundary as raw store credentials.
+- **Fail closed:** a missing Secret or key, a disallowed team, or a disallowed
+  agent type fails the session with `runtime_config.startup_error`. Store
+  credentials only log a warning when missing.
+- **No value leakage:** values never appear in the Job spec, in
+  `runtime_config` (which records only `k8s-secret:<name>/<key>`), or in error
+  messages.
+

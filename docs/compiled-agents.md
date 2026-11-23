@@ -165,6 +165,42 @@ On Kubernetes, direct outbound adds an `alcove.dev/direct-outbound: "true"` pod
 label and skips `HTTP_PROXY`/`HTTPS_PROXY` injection. The cluster must have the
 `alcove-allow-direct-outbound` NetworkPolicy deployed to permit egress.
 
+### Kubernetes Secret Credentials
+
+Executable agents with `direct_outbound: true` can also read credentials
+straight from a Kubernetes Secret, using a `k8s-secret:<secret-name>/<key>`
+value. You don't have to copy the value into the credential store first:
+
+```yaml
+name: Task Monitor
+executable:
+  url: https://example.com/agent-task-monitor
+direct_outbound: true
+credentials:
+  AWS_ACCESS_KEY_ID: k8s-secret:task-monitor-s3/aws_access_key_id
+  AWS_SECRET_ACCESS_KEY: k8s-secret:task-monitor-s3/aws_secret_access_key
+  AWS_REGION: k8s-secret:task-monitor-s3/aws_region
+  S3_BUCKET: k8s-secret:task-monitor-s3/bucket
+```
+
+Rules:
+
+- The Secret must be mounted into Bridge and listed in the `k8s_secrets`
+  configuration, and your team's UUID must be in its `allowed_teams`. See
+  [Kubernetes Secret Credentials](configuration.md#kubernetes-secret-credentials).
+- Only executable agents with `direct_outbound: true` can use this source.
+  Claude Code agents, and executable agents without `direct_outbound`, fail
+  at dispatch.
+- Bridge reads the value on every dispatch, so a rotated Secret takes effect
+  on the next session without restarting Bridge.
+- If the Secret or key is missing, or your team is not allowed, the session
+  fails with a `startup_error`. It does not run without the credential.
+- On Kubernetes, Bridge copies the values into a short-lived per-task Secret
+  that the skiff container reads through `secretKeyRef`. The values never
+  appear in the Job spec, and the per-task Secret is deleted with the Job.
+- `runtime_config.credentials` records the env var and the
+  `k8s-secret:<name>/<key>` source, never the value.
+
 ## Building a Compiled Agent
 
 Follow these steps when writing a compiled agent:
