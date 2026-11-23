@@ -33,6 +33,7 @@ config.yaml
 alcove.yaml
 alcove.conf
 .dev-credentials.yaml
+.dev-secrets/
 
 # PAL / opencode
 .opencode/node_modules/

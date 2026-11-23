@@ -16,12 +16,16 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // newTestKubernetesRuntime creates a KubernetesRuntime with a fake clientset
@@ -1265,5 +1269,144 @@ func assertSecurityContext(t *testing.T, sc *corev1.SecurityContext, containerNa
 	}
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("%s: capabilities.drop should be [ALL], got %v", containerName, sc.Capabilities)
+	}
+}
+
+func TestRunTask_SecretEnvUsesPerTaskSecret(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+	const secretValue = "super-secret-value"
+
+	spec := TaskSpec{
+		TaskID:            "task-secret",
+		Image:             "skiff:latest",
+		GateImage:         "gate:latest",
+		Env:               map[string]string{"TASK_ID": "task-secret", "AWS_ACCESS_KEY_ID": "stale-plain-value"},
+		GateEnv:           map[string]string{"GATE_SESSION_ID": "s"},
+		SecretEnv:         map[string]string{"AWS_ACCESS_KEY_ID": secretValue, "AWS_SECRET_ACCESS_KEY": secretValue},
+		DevContainerImage: "dev:latest",
+		DirectOutbound:    true,
+	}
+	if _, err := rt.RunTask(ctx, spec); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	secretName := taskSecretName("task-secret")
+	secret, err := clientset.CoreV1().Secrets("test-ns").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected task secret %s: %v", secretName, err)
+	}
+	if secret.StringData["AWS_ACCESS_KEY_ID"] != secretValue || secret.StringData["AWS_SECRET_ACCESS_KEY"] != secretValue {
+		t.Errorf("secret data = %v", secret.StringData)
+	}
+	if secret.Labels["alcove.dev/task-id"] != "task-secret" {
+		t.Errorf("secret labels = %v", secret.Labels)
+	}
+	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Kind != "Job" || secret.OwnerReferences[0].Name != jobName("task-secret") {
+		t.Errorf("secret ownerReferences = %+v, want owner Job %s", secret.OwnerReferences, jobName("task-secret"))
+	}
+
+	job, err := clientset.BatchV1().Jobs("test-ns").Get(ctx, jobName("task-secret"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	podSpec := job.Spec.Template.Spec
+
+	// No container may carry the value in plain text.
+	all := append(append([]corev1.Container{}, podSpec.InitContainers...), podSpec.Containers...)
+	for _, c := range all {
+		for _, e := range c.Env {
+			if e.Value == secretValue || e.Value == "stale-plain-value" {
+				t.Errorf("container %s has plain-text secret env %s", c.Name, e.Name)
+			}
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && c.Name != "skiff" {
+				t.Errorf("container %s should not reference the task secret (env %s)", c.Name, e.Name)
+			}
+		}
+	}
+
+	skiff := podSpec.Containers[0]
+	refs := map[string]string{}
+	for _, e := range skiff.Env {
+		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			if e.ValueFrom.SecretKeyRef.Name != secretName {
+				t.Errorf("env %s references secret %q, want %q", e.Name, e.ValueFrom.SecretKeyRef.Name, secretName)
+			}
+			refs[e.Name] = e.ValueFrom.SecretKeyRef.Key
+		}
+	}
+	for _, k := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if refs[k] != k {
+			t.Errorf("skiff env %s: secretKeyRef key = %q, want %q", k, refs[k], k)
+		}
+	}
+	// Each name must appear exactly once (plain duplicate removed).
+	count := 0
+	for _, e := range skiff.Env {
+		if e.Name == "AWS_ACCESS_KEY_ID" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("AWS_ACCESS_KEY_ID appears %d times in skiff env, want 1", count)
+	}
+}
+
+func TestRunTask_NoSecretEnv_NoSecretCreated(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+	if _, err := rt.RunTask(ctx, TaskSpec{TaskID: "task-plain", Image: "skiff", GateImage: "gate"}); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	secrets, err := clientset.CoreV1().Secrets("test-ns").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Errorf("expected no secrets, got %d", len(secrets.Items))
+	}
+}
+
+func TestRunTask_JobCreateFailure_DeletesSecret(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+	clientset.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+
+	_, err := rt.RunTask(ctx, TaskSpec{
+		TaskID: "task-fail", Image: "skiff", GateImage: "gate",
+		SecretEnv: map[string]string{"FOO": "bar"},
+	})
+	if err == nil {
+		t.Fatal("expected RunTask error")
+	}
+	if _, err := clientset.CoreV1().Secrets("test-ns").Get(ctx, taskSecretName("task-fail"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected task secret to be deleted, get err = %v", err)
+	}
+}
+
+func TestCancelTask_DeletesTaskSecret(t *testing.T) {
+	rt, clientset := newTestKubernetesRuntime()
+	ctx := context.Background()
+	handle, err := rt.RunTask(ctx, TaskSpec{
+		TaskID: "task-cancel", Image: "skiff", GateImage: "gate",
+		SecretEnv: map[string]string{"FOO": "bar"},
+	})
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if err := rt.CancelTask(ctx, handle); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	if _, err := clientset.CoreV1().Secrets("test-ns").Get(ctx, taskSecretName("task-cancel"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected task secret to be deleted, get err = %v", err)
+	}
+}
+
+func TestTaskSecretName_FitsDNSLimit(t *testing.T) {
+	name := taskSecretName("123e4567-e89b-12d3-a456-426614174000")
+	if len(name) > 63 {
+		t.Errorf("taskSecretName length %d > 63: %s", len(name), name)
 	}
 }

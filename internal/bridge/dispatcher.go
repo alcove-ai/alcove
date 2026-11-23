@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -47,6 +48,7 @@ type Dispatcher struct {
 	policyRuleStore *PolicyRuleStore
 	repoGroupStore  *RepoGroupStore
 	catalogStore    *CatalogItemStore
+	k8sSecrets      *K8sSecretResolver
 	mu              sync.Mutex
 	handles         map[string]runtime.TaskHandle // sessionID -> handle
 	firstSeenExited map[string]time.Time          // sessionID -> timestamp of first sighting (for grace period)
@@ -56,7 +58,12 @@ type Dispatcher struct {
 
 // NewDispatcher creates a Dispatcher with the given dependencies.
 func NewDispatcher(nc *nats.Conn, db *pgxpool.Pool, rt runtime.Runtime, cfg *Config, credStore *CredentialStore, toolStore *ToolStore, profileStore *ProfileStore, settingsStore *SettingsStore, policyRuleStore *PolicyRuleStore) *Dispatcher {
+	var k8sSecrets *K8sSecretResolver
+	if cfg != nil {
+		k8sSecrets = NewK8sSecretResolver(cfg.K8sSecrets)
+	}
 	return &Dispatcher{
+		k8sSecrets:      k8sSecrets,
 		nc:              nc,
 		db:              db,
 		rt:              rt,
@@ -699,7 +706,21 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	}
 
 	// Resolve credentials from agent definition.
+	// Values sourced from mounted Kubernetes Secrets go into secretEnv so the
+	// runtime can deliver them without writing them into the pod spec.
+	secretEnv := make(map[string]string)
+	var credErrs []error
 	for envVar, credName := range req.Credentials {
+		if name, key, isK8s, err := ParseK8sSecretRef(credName); isK8s {
+			value, err := resolveK8sSecretCredential(d.k8sSecrets, req, activeTeamID, envVar, name, key, err)
+			if err != nil {
+				credErrs = append(credErrs, err)
+				continue
+			}
+			delete(skiffEnv, envVar)
+			secretEnv[envVar] = value
+			continue
+		}
 		// For executable agents with direct_outbound, use raw credentials.
 		// This allows them to perform their own authentication (e.g., with service account JSON).
 		if req.Executable != nil && req.DirectOutbound {
@@ -782,6 +803,14 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	runtimeConfigJSON, _ := json.Marshal(runtimeConfig)
 	_, _ = d.db.Exec(ctx, `UPDATE sessions SET runtime_config = $1 WHERE id = $2`, runtimeConfigJSON, sessionID)
 
+	// Fail the session visibly if any Kubernetes Secret credential could not
+	// be resolved, rather than running without it.
+	if len(credErrs) > 0 {
+		err := fmt.Errorf("resolving credentials: %w", errors.Join(credErrs...))
+		d.failDispatch(ctx, sessionID, runtimeConfig, err)
+		return nil, err
+	}
+
 	// Start Skiff pod via Runtime.
 	spec := runtime.TaskSpec{
 		TaskID:         taskID,
@@ -794,6 +823,9 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 		ExternalNet:    envOrDefault("ALCOVE_EXTERNAL_NETWORK", runtime.DefaultExternalNetwork),
 		Debug:          req.Debug || d.cfg.DebugMode,
 		DirectOutbound: req.DirectOutbound,
+	}
+	if len(secretEnv) > 0 {
+		spec.SecretEnv = secretEnv
 	}
 
 	if req.DevContainer != nil && req.DevContainer.Image != "" {
@@ -812,16 +844,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 
 	handle, err := d.rt.RunTask(ctx, spec)
 	if err != nil {
-		// Update session to error state and store the startup error detail.
-		d.updateSessionStatus(ctx, sessionID, "error", nil, nil)
-		runtimeConfig["startup_error"] = err.Error()
-		runtimeConfigJSON, _ = json.Marshal(runtimeConfig)
-		d.db.Exec(ctx, `UPDATE sessions SET runtime_config = $1 WHERE id = $2`, runtimeConfigJSON, sessionID)
-		if d.workflowEngine != nil {
-			if wfErr := d.workflowEngine.OnStepCompletion(ctx, sessionID, "error", nil); wfErr != nil {
-				log.Printf("error handling workflow step failure for session %s: %v", sessionID, wfErr)
-			}
-		}
+		d.failDispatch(ctx, sessionID, runtimeConfig, err)
 		return nil, fmt.Errorf("starting skiff pod: %w", err)
 	}
 
@@ -830,6 +853,40 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, req TaskRequest, submitte
 	d.mu.Unlock()
 
 	return session, nil
+}
+
+// failDispatch marks a session as errored before its Skiff pod started,
+// records the cause in runtime_config.startup_error, and notifies the
+// workflow engine so the step does not stay stuck in "running".
+func (d *Dispatcher) failDispatch(ctx context.Context, sessionID string, runtimeConfig map[string]any, cause error) {
+	d.updateSessionStatus(ctx, sessionID, "error", nil, nil)
+	runtimeConfig["startup_error"] = cause.Error()
+	runtimeConfigJSON, _ := json.Marshal(runtimeConfig)
+	d.db.Exec(ctx, `UPDATE sessions SET runtime_config = $1 WHERE id = $2`, runtimeConfigJSON, sessionID)
+	if d.workflowEngine != nil {
+		if wfErr := d.workflowEngine.OnStepCompletion(ctx, sessionID, "error", nil); wfErr != nil {
+			log.Printf("error handling workflow step failure for session %s: %v", sessionID, wfErr)
+		}
+	}
+}
+
+// resolveK8sSecretCredential resolves a "k8s-secret:<name>/<key>" credential
+// for envVar. Only executable agents with direct_outbound may use Kubernetes
+// Secret credentials, and only teams allowed by k8s_secrets configuration.
+// parseErr is the error (if any) from ParseK8sSecretRef. Returned errors never
+// contain the Secret value.
+func resolveK8sSecretCredential(resolver *K8sSecretResolver, req TaskRequest, teamID, envVar, name, key string, parseErr error) (string, error) {
+	if parseErr != nil {
+		return "", fmt.Errorf("credential %s: %w", envVar, parseErr)
+	}
+	if req.Executable == nil || !req.DirectOutbound {
+		return "", fmt.Errorf("credential %s: %s credentials are only available to executable agents with direct_outbound", envVar, k8sSecretPrefix)
+	}
+	value, err := resolver.Resolve(teamID, name, key)
+	if err != nil {
+		return "", fmt.Errorf("credential %s: %w", envVar, err)
+	}
+	return value, nil
 }
 
 // CancelSession cancels a running session.

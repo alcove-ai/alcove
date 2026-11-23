@@ -174,6 +174,55 @@ can also be set in `alcove.yaml` (see [alcove.yaml](#alcoveyaml) above).
 | `BRIDGE_LLM_SERVICE_ACCOUNT_JSON` | string | _(unset)_ | Google service account JSON for the system LLM (Vertex AI). Overrides `system_llm.service_account_json` in alcove.yaml. |
 | `BRIDGE_LLM_PROJECT` | string | _(unset)_ | GCP project ID for the system LLM (Vertex AI). Overrides `system_llm.project_id` in alcove.yaml. |
 | `BRIDGE_LLM_REGION` | string | _(unset)_ | GCP region for the system LLM (Vertex AI). Overrides `system_llm.region` in alcove.yaml. |
+| `ALCOVE_K8S_SECRETS` | string (JSON) | _(unset)_ | JSON map of Secret name to policy, for example `{"my-secret":{"allowed_teams":["<team-uuid>"]}}`. Overrides `k8s_secrets.secrets` in alcove.yaml. See [Kubernetes Secret Credentials](#kubernetes-secret-credentials). |
+| `ALCOVE_K8S_SECRETS_ROOT` | string | `/etc/alcove/secrets` | Directory holding mounted Secrets as `<root>/<secret-name>/<key>`. Overrides `k8s_secrets.root` in alcove.yaml. |
+
+### Kubernetes Secret Credentials
+
+Executable agents with `direct_outbound: true` can map env vars to keys of a
+Kubernetes Secret with `k8s-secret:<secret-name>/<key>` (see
+[Compiled Agents](compiled-agents.md#kubernetes-secret-credentials)). Bridge
+reads these values from Secrets mounted into its own pod. Skiff pods never
+mount the source Secret.
+
+A Secret can be used only if both of these are true:
+
+1. It is mounted into Bridge at `<root>/<secret-name>/` (default root
+   `/etc/alcove/secrets`).
+2. It is listed in `k8s_secrets` with the team UUIDs allowed to use it. Run
+   `alcove teams list` to find a team's ID. Team names are not accepted,
+   because they are not unique and can be renamed.
+
+```yaml
+# alcove.yaml
+k8s_secrets:
+  root: /etc/alcove/secrets
+  secrets:
+    task-monitor-s3:
+      allowed_teams:
+        - 3f2a9c1e-0000-0000-0000-000000000000
+```
+
+**OpenShift:** the templates in `deploy/openshift/` expose two parameters:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `AGENT_SECRET_NAME` | `alcove-agent-secret` | Secret in the Bridge namespace, mounted read-only at `/etc/alcove/secrets/<name>/`. The mount is optional, so a missing Secret doesn't block Bridge from starting. |
+| `K8S_SECRETS_CONFIG` | `{}` | Passed to Bridge as `ALCOVE_K8S_SECRETS`. |
+
+To mount more than one Secret, add another `volumes`/`volumeMounts` pair to the
+Bridge Deployment, using the `agent-secret` entry as a model.
+
+At dispatch, Bridge copies the resolved values into a per-task Secret named
+`alcove-task-<task-id>-env`. The skiff container reads it through
+`secretKeyRef`, and the Job owns it, so it is garbage-collected with the Job.
+This requires `create`, `patch`, and `delete` on `secrets` in the Bridge Role,
+which the templates grant.
+
+**Local development (Podman):** point `k8s_secrets.root` at a host directory
+with the same layout, for example `./.dev-secrets/task-monitor-s3/bucket`. On
+Podman the values are passed to the skiff container as env vars, and they are
+redacted from Bridge error logs.
 
 ---
 

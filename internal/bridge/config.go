@@ -17,6 +17,7 @@
 package bridge
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -54,6 +55,31 @@ type Config struct {
 	// Keyed by server name as defined in the mcp.servers section of alcove.yaml.
 	// TODO(Issue B): used by dispatcher to resolve MCPServer references from agent definitions.
 	MCPServers map[string]MCPServerConfig
+
+	// K8sSecrets configures which mounted Kubernetes Secrets agent definitions
+	// may reference via "k8s-secret:<name>/<key>" credentials, and which teams
+	// may use each one.
+	K8sSecrets K8sSecretsConfig
+}
+
+// DefaultK8sSecretsRoot is the directory under which Kubernetes Secrets are
+// mounted into the Bridge pod, one subdirectory per Secret.
+const DefaultK8sSecretsRoot = "/etc/alcove/secrets"
+
+// K8sSecretsConfig is the k8s_secrets section of alcove.yaml.
+type K8sSecretsConfig struct {
+	// Root is the directory containing one subdirectory per mounted Secret
+	// (<root>/<secret-name>/<key>). Defaults to DefaultK8sSecretsRoot.
+	Root string `yaml:"root" json:"root,omitempty"`
+	// Secrets maps a Secret name to its usage policy. Only Secrets listed
+	// here can be referenced by agent definitions.
+	Secrets map[string]K8sSecretPolicy `yaml:"secrets" json:"secrets,omitempty"`
+}
+
+// K8sSecretPolicy restricts which teams may use a mounted Secret.
+type K8sSecretPolicy struct {
+	// AllowedTeams lists team UUIDs permitted to reference this Secret.
+	AllowedTeams []string `yaml:"allowed_teams" json:"allowed_teams"`
 }
 
 // MCPPluginConfig configures which tools a plugin exposes via an MCP server.
@@ -183,6 +209,23 @@ For Kubernetes:
 		cfg.LLMCredentials["vertex"] = v
 	}
 
+	// Kubernetes Secret credential source configuration from environment.
+	if v := os.Getenv("ALCOVE_K8S_SECRETS_ROOT"); v != "" {
+		cfg.K8sSecrets.Root = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ALCOVE_K8S_SECRETS")); v != "" {
+		var secrets map[string]K8sSecretPolicy
+		if err := json.Unmarshal([]byte(v), &secrets); err != nil {
+			return nil, fmt.Errorf("parsing ALCOVE_K8S_SECRETS: %w", err)
+		}
+		if len(secrets) > 0 {
+			cfg.K8sSecrets.Secrets = secrets
+		}
+	}
+	if cfg.K8sSecrets.Root == "" {
+		cfg.K8sSecrets.Root = DefaultK8sSecretsRoot
+	}
+
 	// RH Identity admin bootstrap from environment (comma-separated emails).
 	if v := os.Getenv("RH_IDENTITY_ADMINS"); v != "" {
 		cfg.RHIdentityAdmins = splitAndTrim(v)
@@ -247,6 +290,7 @@ type configFile struct {
 	MCP                   struct {
 		Servers map[string]MCPServerConfig `yaml:"servers"`
 	} `yaml:"mcp"`
+	K8sSecrets            *K8sSecretsConfig `yaml:"k8s_secrets"`
 }
 
 // parseConfigFile reads and parses a YAML config file.
@@ -291,6 +335,9 @@ func (c *Config) parseConfigFile(path string) error {
 	if len(cf.MCP.Servers) > 0 {
 		c.MCPServers = cf.MCP.Servers
 	}
+	if cf.K8sSecrets != nil {
+		c.K8sSecrets = *cf.K8sSecrets
+	}
 	return nil
 }
 
@@ -300,6 +347,9 @@ func (c *Config) validate() error {
 	}
 	if c.AuthBackend != "memory" && c.AuthBackend != "postgres" && c.AuthBackend != "rh-identity" && c.AuthBackend != "openshift-oauth" {
 		return fmt.Errorf("invalid AUTH_BACKEND %q: must be \"memory\", \"postgres\", \"rh-identity\", or \"openshift-oauth\"", c.AuthBackend)
+	}
+	if err := c.K8sSecrets.validate(); err != nil {
+		return err
 	}
 	return nil
 }

@@ -43,3 +43,14 @@ runtime: podman
 #   project_id: my-gcp-project
 #   region: us-east5
 #   model: claude-sonnet-4-20250514
+
+# Kubernetes Secret credentials — lets executable agents with direct_outbound
+# reference keys of mounted Secrets as "k8s-secret:<secret-name>/<key>".
+# Each Secret is read from <root>/<secret-name>/<key> and can only be used by
+# the listed team UUIDs. On podman, point root at a host directory.
+# k8s_secrets:
+#   root: /etc/alcove/secrets
+#   secrets:
+#     task-monitor-s3:
+#       allowed_teams:
+#         - <team-uuid>
