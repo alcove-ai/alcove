@@ -506,8 +506,14 @@ jobs:
           pgrep -fa 'kubectl port-forward' || echo 'WARNING: port-forward processes not running'
           echo "=== Bridge logs ==="
           cat /tmp/alcove-bridge.log || true
+          echo "=== Restarted ledger port-forward log ==="
+          cat /tmp/pf-ledger.log 2>/dev/null || echo '(not restarted)'
           echo "=== Kubernetes pods ==="
           kubectl get pods -n alcove -o wide || true
+          echo "=== Kubernetes events ==="
+          kubectl get events -n alcove --sort-by=.lastTimestamp 2>&1 || true
+          echo "=== Pod descriptions ==="
+          kubectl describe pods -n alcove 2>&1 || true
           echo "=== Ledger logs ==="
           kubectl logs -n alcove alcove-ledger 2>&1 || true
           echo "=== Hail logs ==="
