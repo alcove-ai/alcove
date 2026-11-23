@@ -254,6 +254,15 @@ jobs:
 
       - name: Install k3s
         run: |
+          # Ubuntu 26.04 enables apparmor_restrict_unprivileged_unconfined, which
+          # makes containers run under a stacked label
+          # (cri-containerd.apparmor.d//&unconfined) that containerd's AppArmor
+          # profile doesn't recognise as a peer. Signals/ptrace between processes
+          # in the same container get denied, and e.g. gosu in the postgres image
+          # spins forever. Drop once containerd's profile handles stacked labels.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          fi
           curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --write-kubeconfig-mode=644" sh -
           mkdir -p ~/.kube
           sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
@@ -310,6 +319,15 @@ jobs:
                 value: alcove
               ports:
               - containerPort: 5432
+              # Without a probe the pod is Ready as soon as the container
+              # starts, before postgres listens. Probe over TCP so the
+              # socket-only server used during initdb doesn't count.
+              readinessProbe:
+                exec:
+                  command: ["pg_isready", "-h", "127.0.0.1", "-U", "alcove"]
+                initialDelaySeconds: 2
+                periodSeconds: 2
+                failureThreshold: 60
           ---
           apiVersion: v1
           kind: Service
@@ -375,6 +393,12 @@ jobs:
             if pg_isready -h localhost -p 5432 -U alcove; then
               echo "PostgreSQL is ready"
               exit 0
+            fi
+            # kubectl port-forward exits after a refused upstream connection;
+            # restart it if it died.
+            if ! pgrep -f 'kubectl port-forward -n alcove svc/alcove-ledger' >/dev/null; then
+              echo "Ledger port-forward died, restarting"
+              nohup kubectl port-forward -n alcove svc/alcove-ledger 5432:5432 >/tmp/pf-ledger.log 2>&1 &
             fi
             echo "Waiting for PostgreSQL... ($i/30)"
             sleep 1
@@ -489,8 +513,14 @@ jobs:
           pgrep -fa 'kubectl port-forward' || echo 'WARNING: port-forward processes not running'
           echo "=== Bridge logs ==="
           cat /tmp/alcove-bridge.log || true
+          echo "=== Restarted ledger port-forward log ==="
+          cat /tmp/pf-ledger.log 2>/dev/null || echo '(not restarted)'
           echo "=== Kubernetes pods ==="
           kubectl get pods -n alcove -o wide || true
+          echo "=== Kubernetes events ==="
+          kubectl get events -n alcove --sort-by=.lastTimestamp 2>&1 || true
+          echo "=== Pod descriptions ==="
+          kubectl describe pods -n alcove 2>&1 || true
           echo "=== Ledger logs ==="
           kubectl logs -n alcove alcove-ledger 2>&1 || true
           echo "=== Hail logs ==="
